@@ -12,147 +12,26 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 const brokerUrl = process.env.NEXT_PUBLIC_BROKER_URL ?? "http://localhost:3001";
 const runnerUrl = process.env.NEXT_PUBLIC_RUNNER_URL ?? "http://localhost:3003";
 
-type RunOrigin = "LIVE_AGENT" | "HISTORICAL_REPLAY" | "COUNTERFACTUAL";
-type GraphView = "CURRENT" | "HISTORY" | "PROVENANCE";
-
-type RangeSnapshot = {
-  scenarioVersion: number;
-  policyVersion: number;
-  compromisedDeviceIsolated: boolean;
-  hostileSessionsInvalidated: boolean;
-  credentialState: "ACTIVE" | "QUARANTINED" | "REVOKED";
-  activeCredentialId: string;
-  workers: Array<{
-    id: string;
-    credentialId: string;
-    active: boolean;
-    verified: boolean;
-  }>;
-};
-
-type TopologyNode = {
-  id: string;
-  name: string;
-  assetClass: string;
-  critical: boolean;
-  active: boolean;
-  verified: boolean;
-  status: string;
-  credentialId: string;
-};
-
-type TopologyEdge = {
-  id: string;
-  sourceId: string;
-  targetId: string;
-  type: string;
-};
-
-type Alert = {
-  id: string;
-  severity: string;
-  summary: string;
-  targetId: string;
-  consumerIds?: string[];
-};
-
-type HistoricalCase = {
-  id: string;
-  actionType: string;
-  outcome: "RECOVERED" | "OUTAGE" | "INSUFFICIENT" | "NO_IMPACT";
-  verified: boolean;
-  trustedGatewayRequired: boolean;
-  offDeviceReplay: boolean;
-  summary: string;
-  paths: Array<{ nodeIds: string[]; relationshipIds: string[] }>;
-};
-
-type Policy = {
-  id: string;
-  version: number;
-  summary: string;
-};
-
-type EvidenceLineage = {
-  id: string;
-  sourceId: string;
-  sourceName: string;
-  trusted: boolean;
-  verifiedBy: string | null;
-  contentHash: string;
-};
-
-type ActionProposal = {
-  proposalId: string;
-  runId: string;
-  actionType: string;
-  targetId: string;
-  args: Record<string, unknown>;
-  evidenceIds: string[];
-  rationaleSummary: string;
-};
-
-type Evaluation = {
-  evaluationId: string;
-  proposalId: string;
-  verdict: "ALLOW" | "REVISE" | "DENY" | "ESCALATE";
-  reasonCodes: string[];
-  policyIds: string[];
-  precedentIds: string[];
-  rejectedEvidenceIds: string[];
-  supportingPaths: Array<{ nodeIds: string[]; relationshipIds: string[] }>;
-  suggestedSteps: ActionProposal[];
-  scenarioVersion: number;
-  policyVersion: number;
-  expiresAt: string;
-};
-
-type Decision = {
-  proposal: ActionProposal;
-  evaluation: Evaluation;
-  trace: {
-    queryId: string;
-    graphVersion: { scenarioVersion: number; policyVersion: number };
-    facts: {
-      dependencies: Array<{
-        id: string;
-        name: string;
-        critical: boolean;
-        active: boolean;
-      }>;
-      precedents: HistoricalCase[];
-      evidence: EvidenceLineage[];
-    };
-    policies: Policy[];
-    supportingPaths: Array<{ nodeIds: string[]; relationshipIds: string[] }>;
-  };
-  receipts: Array<{ receiptId: string; status: string; executedAt: string }>;
-};
-
-type EventEnvelope = {
-  eventId: string;
-  runId: string;
-  sequence: number;
-  timestamp: string;
-  type: string;
-  origin: RunOrigin;
-  payload: Record<string, unknown>;
-};
-
-type Probe = {
-  probeId: string;
-  probeClass: "LEGITIMATE_PAYMENT" | "ATTACKER" | "LEDGER";
-  success: boolean;
-  observedAt: string;
-};
-
-type Dashboard = {
-  alerts: Alert[];
-  snapshot: RangeSnapshot | null;
-  topology: { nodes: TopologyNode[]; edges: TopologyEdge[] };
-  cases: HistoricalCase[];
-  policies: Policy[];
-};
+import {
+  EvaluationSchema,
+  EventEnvelopeSchema,
+  ProbeResultSchema,
+  type Evaluation,
+  type EventEnvelope,
+  type RunOrigin,
+  type RangeSnapshot,
+} from "@precedent/contracts";
+import {
+  requestJson,
+  LatestRequest,
+  type Dashboard,
+  type Decision,
+  type GraphView,
+  type Probe,
+  type Alert,
+  type HistoricalCase,
+  type Policy,
+} from "./console-api";
 
 const initialDashboard: Dashboard = {
   alerts: [],
@@ -167,13 +46,13 @@ const retainedEventIdLimit = 200;
 const positions: Record<string, { x: number; y: number }> = {
   "compromised-laptop": { x: 30, y: 60 },
   "attacker-process": { x: 30, y: 250 },
-  "payments-key-v1": { x: 300, y: 155 },
-  "credential-gateway": { x: 300, y: 350 },
-  "payment-worker-a": { x: 600, y: 70 },
-  "payment-worker-b": { x: 600, y: 265 },
-  "checkout-api": { x: 875, y: 70 },
-  "ledger-service": { x: 875, y: 290 },
-  "payments-key-v2": { x: 585, y: 455 },
+  "payments-key-v1": { x: 235, y: 155 },
+  "credential-gateway": { x: 235, y: 350 },
+  "payment-worker-a": { x: 455, y: 70 },
+  "payment-worker-b": { x: 455, y: 265 },
+  "checkout-api": { x: 680, y: 70 },
+  "ledger-service": { x: 680, y: 290 },
+  "payments-key-v2": { x: 455, y: 455 },
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -183,10 +62,8 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 function payloadEvaluation(event: EventEnvelope): Evaluation | null {
-  const evaluation = asRecord(event.payload.evaluation);
-  return typeof evaluation.evaluationId === "string"
-    ? (evaluation as unknown as Evaluation)
-    : null;
+  const result = EvaluationSchema.safeParse(event.payload.evaluation);
+  return result.success ? result.data : null;
 }
 
 function evaluationIdForEvent(event: EventEnvelope): string | null {
@@ -200,26 +77,8 @@ function evaluationIdForEvent(event: EventEnvelope): string | null {
 }
 
 function probeForEvent(event: EventEnvelope): Probe | null {
-  const probe = asRecord(event.payload.probe);
-  return typeof probe.probeId === "string" ? (probe as unknown as Probe) : null;
-}
-
-async function requestJson<T>(
-  baseUrl: string,
-  path: string,
-  init: RequestInit = {},
-): Promise<T> {
-  const response = await fetch(`${baseUrl}${path}`, {
-    ...init,
-    headers: { "content-type": "application/json", ...init.headers },
-  });
-  if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as {
-      message?: string;
-    };
-    throw new Error(body.message ?? `Request failed with ${response.status}.`);
-  }
-  return (await response.json()) as T;
+  const result = ProbeResultSchema.safeParse(event.payload.probe);
+  return result.success ? result.data : null;
 }
 
 function severityClass(severity: string): string {
@@ -244,17 +103,33 @@ function verdictClass(verdict: Evaluation["verdict"]): string {
 
 function nodeStyle(color: string, selected: boolean): React.CSSProperties {
   return {
-    background: selected ? `${color}2b` : "#0d1725",
-    border: `1px solid ${selected ? color : "#29405a"}`,
+    background: selected ? "var(--panel-raised)" : "var(--panel)",
+    border: `1px solid ${selected ? color : "var(--line)"}`,
     borderRadius: 8,
-    boxShadow: selected ? `0 0 0 1px ${color}55, 0 0 24px ${color}33` : "none",
-    color: "#dce9f6",
-    fontSize: 11,
+    boxShadow: selected ? `0 0 0 1px ${color}` : "none",
+    color: "var(--text)",
+    fontSize: 15,
     fontWeight: 650,
     padding: "9px 12px",
-    width: 158,
+    width: 164,
     textAlign: "center",
   };
+}
+
+function originLabel(event: EventEnvelope): string {
+  const proposal = asRecord(event.payload.proposal);
+  const proposalId =
+    proposal.proposalId ??
+    event.payload.proposalId ??
+    payloadEvaluation(event)?.proposalId;
+  if (
+    (typeof proposalId === "string" &&
+      proposalId.startsWith("forged-runbook-")) ||
+    (event.type === "EVIDENCE_REJECTED" &&
+      event.payload.evidenceId === "forged-runbook")
+  )
+    return "DEMO INJECTION";
+  return event.origin.replaceAll("_", " ");
 }
 
 function eventSummary(event: EventEnvelope): string {
@@ -304,12 +179,22 @@ export function IncidentConsole() {
   >(null);
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
   const [graphView, setGraphView] = useState<GraphView>("CURRENT");
+  const [showComparison, setShowComparison] = useState(false);
   const [showWhy, setShowWhy] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [connection, setConnection] = useState("Connecting to event stream");
+  const [notice, setNotice] = useState(
+    "Ready. Replay H41 to inspect a blocked proposal, or launch a live response.",
+  );
+  const [decisionPending, setDecisionPending] = useState(false);
+  const decisionRequest = useRef(new LatestRequest());
+  const dashboardRequest = useRef(new LatestRequest());
+  const manualSelection = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const seenEventIds = useRef(new Set<string>());
 
   const loadDashboard = useCallback(async () => {
+    const isCurrent = dashboardRequest.current.begin();
     try {
       const [alerts, topology, cases, policies] = await Promise.all([
         requestJson<{ alerts: Alert[]; snapshot: RangeSnapshot }>(
@@ -323,6 +208,7 @@ export function IncidentConsole() {
         requestJson<{ cases: HistoricalCase[] }>(brokerUrl, "/api/cases"),
         requestJson<{ policies: Policy[] }>(brokerUrl, "/api/policies"),
       ]);
+      if (!isCurrent()) return;
       setDashboard({
         alerts: alerts.alerts,
         snapshot: topology.snapshot ?? alerts.snapshot,
@@ -330,8 +216,8 @@ export function IncidentConsole() {
         cases: cases.cases,
         policies: policies.policies,
       });
-      setError(null);
     } catch (loadError) {
+      if (!isCurrent()) return;
       setError(
         loadError instanceof Error
           ? loadError.message
@@ -341,19 +227,25 @@ export function IncidentConsole() {
   }, []);
 
   const loadDecision = useCallback(async (evaluationId: string) => {
+    const isCurrent = decisionRequest.current.begin();
+    setDecisionPending(true);
     try {
       const next = await requestJson<Decision>(
         brokerUrl,
         `/api/decisions/${encodeURIComponent(evaluationId)}`,
       );
+      if (!isCurrent()) return;
       setDecision(next);
       setSelectedEvaluationId(evaluationId);
     } catch (loadError) {
+      if (!isCurrent()) return;
       setError(
         loadError instanceof Error
           ? loadError.message
           : "Unable to load the decision trace.",
       );
+    } finally {
+      if (isCurrent()) setDecisionPending(false);
     }
   }, []);
 
@@ -362,9 +254,9 @@ export function IncidentConsole() {
     const stream = new EventSource(`${brokerUrl}/events`);
     const onPrecedentEvent = (message: Event) => {
       try {
-        const event = JSON.parse(
-          (message as MessageEvent<string>).data,
-        ) as EventEnvelope;
+        const event = EventEnvelopeSchema.parse(
+          JSON.parse((message as MessageEvent<string>).data),
+        );
         if (seenEventIds.current.has(event.eventId)) {
           return;
         }
@@ -377,11 +269,21 @@ export function IncidentConsole() {
         }
         setEvents((current) => [event, ...current].slice(0, 100));
         const evaluation = payloadEvaluation(event);
-        if (evaluation) {
+        if (event.type === "RUN_STARTED" && event.origin === "LIVE_AGENT")
+          setCurrentRunId(event.runId);
+        if (event.type === "RANGE_RESET") {
+          setCurrentRunId(null);
+          setDecision(null);
+          setSelectedEvaluationId(null);
+          manualSelection.current = false;
+          decisionRequest.current.cancel();
+          setDecisionPending(false);
+        }
+        if (evaluation && !manualSelection.current) {
           void loadDecision(evaluation.evaluationId);
         } else {
           const evaluationId = evaluationIdForEvent(event);
-          if (evaluationId) {
+          if (evaluationId && !manualSelection.current) {
             void loadDecision(evaluationId);
           }
         }
@@ -401,13 +303,21 @@ export function IncidentConsole() {
       }
     };
     stream.addEventListener("precedent", onPrecedentEvent);
+    stream.onopen = () => setConnection("Event stream connected");
     stream.onerror = () =>
-      setError("Waiting for the broker event stream to reconnect.");
-    return () => stream.close();
+      setConnection("Event stream reconnecting · displayed data may be stale");
+    return () => {
+      stream.close();
+      decisionRequest.current.cancel();
+      dashboardRequest.current.cancel();
+    };
   }, [loadDashboard, loadDecision]);
 
   const startAgent = async () => {
+    manualSelection.current = false;
+    setError(null);
     setBusyAction("launch");
+    setNotice("Starting a Qoder response session…");
     try {
       const run = await requestJson<{ runId: string }>(runnerUrl, "/api/runs", {
         method: "POST",
@@ -418,8 +328,14 @@ export function IncidentConsole() {
         }),
       });
       setCurrentRunId(run.runId);
+      setNotice(
+        "Live response started. Follow the action stream for evaluated operations.",
+      );
       setError(null);
     } catch (actionError) {
+      setNotice(
+        "The action was not confirmed. Inspect the action stream before retrying.",
+      );
       setError(
         actionError instanceof Error
           ? actionError.message
@@ -435,17 +351,29 @@ export function IncidentConsole() {
     path: string,
     origin: RunOrigin = "LIVE_AGENT",
   ) => {
+    if (action === "compare") setShowComparison(true);
+    setError(null);
     setBusyAction(action);
+    manualSelection.current = false;
+    setNotice("Running " + action + "…");
     try {
       const runId = currentRunId ?? crypto.randomUUID();
       const result = await requestJson<{ runId: string }>(runnerUrl, path, {
         method: "POST",
         body: JSON.stringify({ runId, origin }),
       });
-      setCurrentRunId(result.runId);
+      if (action !== "reset" && origin === "LIVE_AGENT")
+        setCurrentRunId(result.runId);
+      setNotice(
+        action === "reset"
+          ? "Live topology reset. Learned memory preserved."
+          : "Demo action completed. Inspect the action stream and evidence.",
+      );
       await loadDashboard();
-      setError(null);
     } catch (actionError) {
+      setNotice(
+        "The action was not confirmed. Inspect the action stream before retrying.",
+      );
       setError(
         actionError instanceof Error
           ? actionError.message
@@ -477,29 +405,52 @@ export function IncidentConsole() {
   const graph = useMemo((): { nodes: Node[]; edges: Edge[] } => {
     if (graphView === "HISTORY") {
       const nodes: Node[] = dashboard.cases.map((incident, index) => ({
-        id: `case-${incident.id}`,
+        id: incident.id,
         position: {
-          x: 60 + (index % 2) * 360,
-          y: 65 + Math.floor(index / 2) * 185,
+          x: 80,
+          y: 120 + index * 170,
         },
         data: {
           label: `${incident.id}\n${incident.outcome} · ${incident.verified ? "verified" : "unverified"}`,
         },
         style: nodeStyle(
           incident.outcome === "RECOVERED" || incident.outcome === "NO_IMPACT"
-            ? "#43d59b"
-            : "#ff6375",
+            ? "var(--green)"
+            : "var(--red)",
           decision?.evaluation.precedentIds.includes(incident.id) ?? false,
         ),
       }));
-      const edges: Edge[] = dashboard.cases.slice(1).map((incident, index) => ({
-        id: `history-${incident.id}`,
-        source: `case-${dashboard.cases[index].id}`,
-        target: `case-${incident.id}`,
-        label: "context + outcome",
-        style: { stroke: "#42617e", strokeWidth: 1.25 },
-        labelStyle: { fill: "#8ca5bc", fontSize: 10 },
-      }));
+      const edges: Edge[] = [];
+      dashboard.cases.forEach((incident, index) => {
+        incident.paths.forEach((path) =>
+          path.relationshipIds.forEach((id, step) => {
+            const source = path.nodeIds[step];
+            const target = path.nodeIds[step + 1];
+            if (!source || !target || edges.some((edge) => edge.id === id))
+              return;
+            for (const [offset, nodeId] of [source, target].entries()) {
+              if (!nodes.some((node) => node.id === nodeId))
+                nodes.push({
+                  id: nodeId,
+                  position: { x: 80 + offset * 300, y: 120 + index * 170 },
+                  data: { label: nodeId },
+                  style: nodeStyle(
+                    "var(--history)",
+                    selectedNodeIds.has(nodeId),
+                  ),
+                });
+            }
+            edges.push({
+              id,
+              source,
+              target,
+              label: id,
+              style: { stroke: "var(--history)" },
+              labelStyle: { fill: "var(--muted)" },
+            });
+          }),
+        );
+      });
       return { nodes, edges };
     }
 
@@ -516,14 +467,17 @@ export function IncidentConsole() {
           data: {
             label: `${item.id}\n${item.trusted ? "trusted evidence" : "untrusted evidence"}`,
           },
-          style: nodeStyle(item.trusted ? "#43d59b" : "#ff6375", true),
+          style: nodeStyle(item.trusted ? "var(--green)" : "var(--red)", true),
         });
         if (!nodes.some((node) => node.id === sourceId)) {
           nodes.push({
             id: sourceId,
             position: { x: 400, y: 75 + index * 170 },
             data: { label: `${item.sourceName}\nsource authority` },
-            style: nodeStyle(item.trusted ? "#42a4ff" : "#f7af4c", false),
+            style: nodeStyle(
+              item.trusted ? "var(--blue)" : "var(--amber)",
+              false,
+            ),
           });
         }
         edges.push({
@@ -532,10 +486,10 @@ export function IncidentConsole() {
           target: sourceId,
           label: "FROM SOURCE",
           style: {
-            stroke: item.trusted ? "#43d59b" : "#ff6375",
+            stroke: item.trusted ? "var(--green)" : "var(--red)",
             strokeWidth: 1.5,
           },
-          labelStyle: { fill: "#a8bed0", fontSize: 10 },
+          labelStyle: { fill: "var(--muted)", fontSize: 10 },
         });
         if (item.verifiedBy) {
           const verificationId = `verification-${item.verifiedBy}`;
@@ -543,15 +497,15 @@ export function IncidentConsole() {
             id: verificationId,
             position: { x: 720, y: 75 + index * 170 },
             data: { label: `${item.verifiedBy}\ntrusted verification` },
-            style: nodeStyle("#43d59b", false),
+            style: nodeStyle("var(--green)", false),
           });
           edges.push({
             id: `verified-${item.id}`,
             source: evidenceId,
             target: verificationId,
             label: "VERIFIED BY",
-            style: { stroke: "#43d59b", strokeWidth: 1.5 },
-            labelStyle: { fill: "#a8bed0", fontSize: 10 },
+            style: { stroke: "var(--green)", strokeWidth: 1.5 },
+            labelStyle: { fill: "var(--muted)", fontSize: 10 },
           });
         }
       });
@@ -563,14 +517,14 @@ export function IncidentConsole() {
       const isCompromised =
         asset.id === "payments-key-v1" &&
         dashboard.snapshot?.credentialState === "ACTIVE";
-      const isVerified = asset.verified || asset.id === "payments-key-v2";
+      const isVerified = asset.verified;
       const color = isCompromised
-        ? "#ff6375"
+        ? "var(--red)"
         : isVerified
-          ? "#43d59b"
+          ? "var(--green)"
           : asset.critical
-            ? "#f7af4c"
-            : "#42a4ff";
+            ? "var(--amber)"
+            : "var(--blue)";
       return {
         id: asset.id,
         position: positions[asset.id] ?? {
@@ -578,7 +532,7 @@ export function IncidentConsole() {
           y: 55 + Math.floor(index / 4) * 165,
         },
         data: {
-          label: `${asset.name}\n${asset.assetClass}${asset.critical ? " · critical" : ""}`,
+          label: `${asset.name}\n${asset.assetClass}${isCompromised ? " · compromised" : isVerified ? " · verified" : asset.critical ? " · critical" : ""}`,
         },
         style: nodeStyle(color, isSelected || isCompromised),
       };
@@ -588,13 +542,13 @@ export function IncidentConsole() {
       source: edge.sourceId,
       target: edge.targetId,
       label: edge.type.replaceAll("_", " "),
-      animated: selectedEdgeIds.has(edge.id),
+      animated: false,
       style: {
-        stroke: selectedEdgeIds.has(edge.id) ? "#ff6375" : "#40607f",
+        stroke: selectedEdgeIds.has(edge.id) ? "var(--red)" : "var(--edge)",
         strokeWidth: selectedEdgeIds.has(edge.id) ? 2.5 : 1.25,
       },
-      labelStyle: { fill: "#94acc0", fontSize: 9 },
-      labelBgStyle: { fill: "#0a1320", fillOpacity: 0.92 },
+      labelStyle: { fill: "var(--muted)", fontSize: 9 },
+      labelBgStyle: { fill: "var(--bg)", fillOpacity: 0.92 },
       labelBgPadding: [3, 2],
     }));
     return { nodes, edges };
@@ -613,23 +567,31 @@ export function IncidentConsole() {
   const ledgerProbe = latestProbe(observedEvents, "LEDGER");
 
   return (
-    <main className="console-shell">
+    <main className="console-shell" id="main-content">
+      <a className="skip-link" href="#demo-controls">
+        Skip to incident controls
+      </a>
       <header className="topbar">
         <div className="brand-lockup">
           <span className="brand-mark">P</span>
           <div>
-            <p className="eyebrow">NEXUS FINANCIAL · INCIDENT COMMAND</p>
-            <h1>PRECEDENT</h1>
+            <p className="eyebrow">NEXUS FINANCIAL / CONTROLLED ENVIRONMENT</p>
+            <h1>
+              Precedent
+              <span className="brand-subtitle">Judgment before action.</span>
+            </h1>
           </div>
         </div>
         <div className="topbar-status">
           <span
-            className={`status-dot ${dashboard.snapshot?.credentialState === "ACTIVE" ? "danger" : "safe"}`}
+            className={`status-dot ${!dashboard.snapshot ? "unknown" : dashboard.snapshot.credentialState === "ACTIVE" ? "danger" : "safe"}`}
           />
           <span>
-            {dashboard.snapshot?.credentialState === "ACTIVE"
-              ? "COMPROMISE ACTIVE"
-              : "CONTAINMENT STATE"}
+            {!dashboard.snapshot
+              ? "STATE UNAVAILABLE"
+              : dashboard.snapshot.credentialState === "ACTIVE"
+                ? "COMPROMISE ACTIVE"
+                : "CREDENTIAL " + dashboard.snapshot.credentialState}
           </span>
           <span className="divider" />
           <span>GRAPH v{dashboard.snapshot?.scenarioVersion ?? "—"}</span>
@@ -659,14 +621,173 @@ export function IncidentConsole() {
         <div className="metric-card">
           <span className="metric-label">Verified memory</span>
           <strong>
-            {dashboard.cases.filter((item) => item.verified).length}
+            {dashboard.snapshot
+              ? dashboard.cases.filter((item) => item.verified).length
+              : "—"}
           </strong>
-          <span className="metric-caption">cases with a verifier record</span>
+          <span className="metric-caption">
+            seeded and learned verified cases
+          </span>
         </div>
       </section>
 
-      {error ? <div className="connection-banner">{error}</div> : null}
+      <div className="session-strip">
+        <span>{connection}</span>
+        <span>Fictional scenario · modeled range observations</span>
+      </div>
+      <p className="command-status" role="status" aria-live="polite">
+        {notice}
+      </p>
+      {error ? (
+        <div className="connection-banner" role="alert">
+          {error}{" "}
+          <button
+            onClick={() => {
+              setError(null);
+              void loadDashboard();
+            }}
+          >
+            Retry connection
+          </button>
+        </div>
+      ) : null}
 
+      <section
+        className="control-deck panel"
+        id="demo-controls"
+        aria-label="Incident controls"
+      >
+        <div>
+          <p className="eyebrow">INCIDENT CONTROLS</p>
+          <h2>Investigate. Intervene. Verify.</h2>
+        </div>
+        <div className="control-actions">
+          <button
+            className="primary"
+            disabled={busyAction !== null}
+            onClick={() => void startAgent()}
+            type="button"
+          >
+            {busyAction === "launch"
+              ? "Launching agent…"
+              : "Launch attack response"}
+          </button>
+          <button
+            disabled={busyAction !== null}
+            onClick={() =>
+              void runDemo(
+                "replay",
+                "/api/demo/historical-replay",
+                "HISTORICAL_REPLAY",
+              )
+            }
+            type="button"
+          >
+            {busyAction === "replay" ? "Replaying…" : "Replay H41 proposal"}
+          </button>
+          <button
+            disabled={busyAction !== null}
+            onClick={() =>
+              void runDemo("compare", "/api/demo/compare-h41", "COUNTERFACTUAL")
+            }
+            type="button"
+          >
+            {busyAction === "compare" ? "Comparing…" : "Compare response"}
+          </button>
+        </div>
+        <details className="secondary-controls">
+          <summary>Scenario tools &amp; reset</summary>
+          <div className="control-actions">
+            {" "}
+            <button
+              disabled={busyAction !== null}
+              onClick={() =>
+                void runDemo("inject", "/api/demo/inject-forged-runbook")
+              }
+              type="button"
+            >
+              {busyAction === "inject" ? "Injecting…" : "Inject forged runbook"}
+            </button>
+            <button
+              className="quiet"
+              disabled={busyAction !== null}
+              onClick={() => void runDemo("reset", "/api/demo/reset")}
+              type="button"
+            >
+              {busyAction === "reset"
+                ? "Resetting…"
+                : "Reset topology · keep memory"}
+            </button>
+          </div>
+          <p className="command-status">
+            Reset restores the live topology and preserves learned precedent.
+          </p>
+        </details>
+      </section>
+
+      {showComparison ? (
+        <section
+          className="comparison-panel panel"
+          aria-label="Response comparison"
+        >
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">COUNTERFACTUAL · MODELED RESULTS</p>
+              <h2>Immediate revocation vs. live response</h2>
+            </div>
+            <button
+              className="why-button"
+              onClick={() => setShowComparison(false)}
+            >
+              Close comparison
+            </button>
+          </div>
+          <p className="trace-note">
+            Counterfactual results come from a separate seeded model. The
+            backend does not yet guarantee that it matches the live incident’s
+            initial snapshot.
+          </p>
+          <div className="comparison-grid">
+            {(["LEGITIMATE_PAYMENT", "ATTACKER", "LEDGER"] as const).map(
+              (probeClass) => {
+                const comparisonRun = events.find(
+                  (event) => event.origin === "COUNTERFACTUAL",
+                )?.runId;
+                const projected = latestProbe(
+                  events.filter(
+                    (event) =>
+                      event.origin === "COUNTERFACTUAL" &&
+                      event.runId === comparisonRun,
+                  ),
+                  probeClass,
+                );
+                const observed = latestProbe(observedEvents, probeClass);
+                return (
+                  <div key={probeClass}>
+                    <h3>{probeClass.replaceAll("_", " ")}</h3>
+                    <p>
+                      Counterfactual:{" "}
+                      {projected
+                        ? projected.success
+                          ? "success"
+                          : "failure"
+                        : "Awaiting result"}
+                    </p>
+                    <p>
+                      Live run:{" "}
+                      {observed
+                        ? observed.success
+                          ? "success"
+                          : "failure"
+                        : "Not measured"}
+                    </p>
+                  </div>
+                );
+              },
+            )}
+          </div>
+        </section>
+      ) : null}
       <section className="workspace">
         <aside className="timeline-panel panel">
           <div className="panel-heading">
@@ -679,28 +800,38 @@ export function IncidentConsole() {
           <div className="timeline-list">
             {events.length === 0 ? (
               <p className="empty-state">
-                Waiting for incident and range events.
+                No events yet. Replay H41 below to see why immediate revocation
+                is blocked, or launch a live response.
               </p>
             ) : (
               events.map((event) => {
                 const evaluationId = evaluationIdForEvent(event);
                 return (
                   <button
-                    className={`event-row ${selectedEvaluationId === evaluationId ? "selected" : ""}`}
-                    key={event.eventId}
-                    onClick={() =>
-                      evaluationId && void loadDecision(evaluationId)
+                    className={`event-row ${evaluationId && selectedEvaluationId === evaluationId ? "selected" : ""}`}
+                    disabled={!evaluationId}
+                    aria-pressed={
+                      evaluationId
+                        ? selectedEvaluationId === evaluationId
+                        : undefined
                     }
+                    key={event.eventId}
+                    onClick={() => {
+                      if (evaluationId) {
+                        manualSelection.current = true;
+                        void loadDecision(evaluationId);
+                      }
+                    }}
                     type="button"
                   >
                     <span
                       className={`origin-badge ${event.origin.toLowerCase()}`}
                     >
-                      {event.origin.replaceAll("_", " ")}
+                      {originLabel(event)}
                     </span>
                     <strong>{event.type.replaceAll("_", " ")}</strong>
                     <span>{eventSummary(event)}</span>
-                    <time>
+                    <time dateTime={event.timestamp}>
                       {new Date(event.timestamp).toLocaleTimeString()}
                     </time>
                   </button>
@@ -718,20 +849,29 @@ export function IncidentConsole() {
                 {graphView === "CURRENT"
                   ? "Current infrastructure"
                   : graphView === "HISTORY"
-                    ? "Verified precedent memory"
+                    ? "Historical precedent memory"
                     : "Evidence provenance"}
               </h2>
             </div>
-            <div className="segmented-control" aria-label="Graph view">
+            <div
+              className="segmented-control"
+              role="group"
+              aria-label="Graph view"
+            >
               {(["CURRENT", "HISTORY", "PROVENANCE"] as GraphView[]).map(
                 (view) => (
                   <button
+                    aria-pressed={graphView === view}
                     className={graphView === view ? "active" : ""}
                     key={view}
                     onClick={() => setGraphView(view)}
                     type="button"
                   >
-                    {view}
+                    {view === "CURRENT"
+                      ? "Infrastructure"
+                      : view === "HISTORY"
+                        ? "Memory"
+                        : "Sources"}
                   </button>
                 ),
               )}
@@ -740,9 +880,14 @@ export function IncidentConsole() {
           <div className="graph-canvas">
             {graph.nodes.length > 0 ? (
               <ReactFlow
+                defaultEdgeOptions={{
+                  labelBgStyle: { fill: "var(--panel)" },
+                  labelStyle: { fill: "var(--muted)", fontSize: 12 },
+                }}
+                key={graphView}
                 edges={graph.edges}
                 fitView
-                fitViewOptions={{ padding: 0.2 }}
+                fitViewOptions={{ padding: 0.08 }}
                 nodes={graph.nodes}
                 nodesConnectable={false}
                 nodesDraggable={false}
@@ -760,24 +905,35 @@ export function IncidentConsole() {
               </div>
             )}
           </div>
+          <details className="graph-text">
+            <summary>Read graph as text</summary>
+            <ul>
+              {graph.nodes.map((node) => (
+                <li key={node.id}>{String(node.data.label)}</li>
+              ))}
+            </ul>
+            <ul>
+              {graph.edges.map((edge) => (
+                <li key={edge.id}>
+                  {edge.source} → {edge.target}: {String(edge.label)}
+                </li>
+              ))}
+            </ul>
+          </details>
           <div className="graph-legend">
             <span>
               <i className="legend-dot compromised" /> compromised or blocked
             </span>
             <span>
-              <i className="legend-dot unresolved" /> unresolved critical
-              dependency
+              <i className="legend-dot unresolved" /> critical dependency
             </span>
             <span>
-              <i className="legend-dot verified" /> verified recovery
-            </span>
-            <span>
-              <i className="legend-dot historical" /> historical evidence
+              <i className="legend-dot verified" /> verified state
             </span>
           </div>
         </section>
 
-        <aside className="evidence-panel panel">
+        <aside className="evidence-panel panel" aria-busy={decisionPending}>
           <div className="panel-heading">
             <div>
               <p className="eyebrow">PRECEDENT EVALUATOR</p>
@@ -791,8 +947,31 @@ export function IncidentConsole() {
               </span>
             ) : null}
           </div>
+          {decisionPending ? (
+            <p className="command-status" role="status">
+              Loading selected decision…
+            </p>
+          ) : null}
           {decision ? (
             <div className="evidence-content">
+              <p className="section-label">
+                {decision.proposal.proposalId.startsWith("forged-runbook-")
+                  ? "DEMO INJECTION"
+                  : (events
+                      .find(
+                        (event) =>
+                          evaluationIdForEvent(event) ===
+                          decision.evaluation.evaluationId,
+                      )
+                      ?.origin.replaceAll("_", " ") ?? "Origin unavailable")}
+              </p>
+              <p className="receipt-summary">
+                {decision.receipts.length
+                  ? decision.receipts
+                      .map((receipt) => receipt.status)
+                      .join(" · ")
+                  : "No execution receipt for this proposal"}
+              </p>
               <p className="decision-action">
                 {decision.proposal.actionType.replaceAll("_", " ")}{" "}
                 <span>→</span> {decision.proposal.targetId}
@@ -804,13 +983,61 @@ export function IncidentConsole() {
               </div>
               <button
                 className="why-button"
+                aria-expanded={showWhy}
+                aria-controls="decision-trace"
                 onClick={() => setShowWhy((visible) => !visible)}
                 type="button"
               >
                 {showWhy ? "Hide decision trace" : "Show me why"}
               </button>
               {showWhy ? (
-                <div className="trace-details">
+                <div className="trace-details" id="decision-trace">
+                  <button
+                    className="why-button"
+                    onClick={() => {
+                      const blob = new Blob(
+                        [
+                          JSON.stringify(
+                            {
+                              exportedAt: new Date().toISOString(),
+                              scope:
+                                "Selected decision and retained events only; current facts are not an immutable evaluation snapshot",
+                              decision,
+                              events: events.filter(
+                                (event) =>
+                                  event.runId === decision.proposal.runId,
+                              ),
+                            },
+                            null,
+                            2,
+                          ),
+                        ],
+                        { type: "application/json" },
+                      );
+                      const url = URL.createObjectURL(blob);
+                      const link = document.createElement("a");
+                      link.href = url;
+                      link.download = `precedent-${decision.evaluation.evaluationId}.json`;
+                      link.click();
+                      URL.revokeObjectURL(url);
+                      setNotice(
+                        "Selected decision exported with retained run events.",
+                      );
+                    }}
+                  >
+                    Export selected decision
+                  </button>
+                  <p className="trace-note">
+                    Supporting path IDs were stored at evaluation. Facts below
+                    are retrieved from the current graph and may have changed.
+                  </p>
+                  <TraceSection
+                    title="Trace reference"
+                    items={[
+                      decision.trace.queryId,
+                      `Evaluation topology v${decision.evaluation.scenarioVersion} · policy v${decision.evaluation.policyVersion}`,
+                    ]}
+                  />
                   <TraceSection
                     title="Current dependency facts"
                     items={decision.trace.facts.dependencies.map(
@@ -878,64 +1105,6 @@ export function IncidentConsole() {
         </aside>
       </section>
 
-      <section className="control-deck panel">
-        <div>
-          <p className="eyebrow">DEMO CONTROL PLANE</p>
-          <h2>Every consequential action remains broker-gated.</h2>
-        </div>
-        <div className="control-actions">
-          <button
-            className="primary"
-            disabled={busyAction !== null}
-            onClick={() => void startAgent()}
-            type="button"
-          >
-            {busyAction === "launch"
-              ? "Launching agent…"
-              : "Launch attack response"}
-          </button>
-          <button
-            disabled={busyAction !== null}
-            onClick={() =>
-              void runDemo(
-                "replay",
-                "/api/demo/historical-replay",
-                "HISTORICAL_REPLAY",
-              )
-            }
-            type="button"
-          >
-            {busyAction === "replay" ? "Replaying…" : "Replay H41 proposal"}
-          </button>
-          <button
-            disabled={busyAction !== null}
-            onClick={() =>
-              void runDemo("inject", "/api/demo/inject-forged-runbook")
-            }
-            type="button"
-          >
-            {busyAction === "inject" ? "Injecting…" : "Inject forged runbook"}
-          </button>
-          <button
-            disabled={busyAction !== null}
-            onClick={() =>
-              void runDemo("compare", "/api/demo/compare-h41", "COUNTERFACTUAL")
-            }
-            type="button"
-          >
-            {busyAction === "compare" ? "Comparing…" : "Compare response"}
-          </button>
-          <button
-            className="quiet"
-            disabled={busyAction !== null}
-            onClick={() => void runDemo("reset", "/api/demo/reset")}
-            type="button"
-          >
-            {busyAction === "reset" ? "Resetting…" : "Reset live topology"}
-          </button>
-        </div>
-      </section>
-
       <section className="alert-strip" aria-label="Current incident alerts">
         {dashboard.alerts.map((alert) => (
           <div
@@ -988,6 +1157,11 @@ function Metric({
             ? successText
             : failureText}
       </span>
+      {probe ? (
+        <time className="metric-caption" dateTime={probe.observedAt}>
+          {new Date(probe.observedAt).toLocaleTimeString()} · latest probe
+        </time>
+      ) : null}
     </div>
   );
 }
