@@ -1,0 +1,12 @@
+FROM node:24-alpine AS mesh
+WORKDIR /app
+COPY apps/range/services/mesh.mjs ./mesh.mjs
+CMD ["node", "mesh.mjs"]
+
+FROM node:24-alpine AS controller
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.base.json ./
+COPY packages ./packages
+COPY apps ./apps
+RUN npm ci --ignore-scripts
+CMD ["node", "--import", "tsx", "apps/range/src/server.ts"]

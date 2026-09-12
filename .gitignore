@@ -11,3 +11,7 @@ coverage
 .DS_Store
 precedent-phase-plan.md
 precedent-project-and-demo.md
+
+data/
+
+.env.range

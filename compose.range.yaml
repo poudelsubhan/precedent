@@ -1,0 +1,418 @@
+{
+  "name": "precedent-range",
+  "services":
+    {
+      "range":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "controller",
+            },
+          "environment":
+            {
+              "RANGE_PORT": "3002",
+              "RANGE_HOST": "0.0.0.0",
+              "MESH_EXTERNAL": "1",
+              "RANGE_BROKER_TOKEN": "${RANGE_BROKER_TOKEN}",
+              "RANGE_READ_TOKEN": "${RANGE_READ_TOKEN}",
+              "OBSERVATION_TOKEN": "${OBSERVATION_TOKEN}",
+            },
+          "ports": ["127.0.0.1:3102:3002"],
+          "networks": ["default", "control"],
+          "volumes": ["range-state:/app/data/range"],
+        },
+      "live-checkout":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "checkout",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "live",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://live-checkout:4100",
+              "GATEWAY_URL": "http://live-gateway:4100",
+              "LEDGER_URL": "http://live-ledger:4100",
+              "DATA_DIR": "/data",
+              "RANGE_READ_TOKEN": "${RANGE_READ_TOKEN}",
+              "WORKER_URLS": '{"payment-worker-a": "http://live-worker-a:4100", "payment-worker-b": "http://live-worker-b:4100", "payment-worker-hidden": "http://live-worker-hidden:4100"}',
+            },
+          "depends_on": ["range"],
+        },
+      "live-gateway":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "gateway",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "live",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://live-checkout:4100",
+              "GATEWAY_URL": "http://live-gateway:4100",
+              "LEDGER_URL": "http://live-ledger:4100",
+              "DATA_DIR": "/data",
+              "RANGE_READ_TOKEN": "${RANGE_READ_TOKEN}",
+              "LEDGER_TOKEN": "${LEDGER_TOKEN}",
+              "WORKLOAD_SECRETS": '{"payment-worker-a": "${WORKER_A_SECRET}", "payment-worker-b": "${WORKER_B_SECRET}", "payment-worker-hidden": "${WORKER_HIDDEN_SECRET}"}',
+            },
+          "depends_on": ["range"],
+        },
+      "live-ledger":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "ledger",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "live",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://live-checkout:4100",
+              "GATEWAY_URL": "http://live-gateway:4100",
+              "LEDGER_URL": "http://live-ledger:4100",
+              "DATA_DIR": "/data",
+              "LEDGER_TOKEN": "${LEDGER_TOKEN}",
+            },
+          "depends_on": ["range"],
+          "volumes": ["live-ledger:/data"],
+        },
+      "live-worker-a":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "worker",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "live",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://live-checkout:4100",
+              "GATEWAY_URL": "http://live-gateway:4100",
+              "LEDGER_URL": "http://live-ledger:4100",
+              "DATA_DIR": "/data",
+              "RANGE_READ_TOKEN": "${RANGE_READ_TOKEN}",
+              "WORKER_ID": "payment-worker-a",
+              "WORKLOAD_SECRET": "${WORKER_A_SECRET}",
+            },
+          "depends_on": ["range"],
+        },
+      "live-worker-b":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "worker",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "live",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://live-checkout:4100",
+              "GATEWAY_URL": "http://live-gateway:4100",
+              "LEDGER_URL": "http://live-ledger:4100",
+              "DATA_DIR": "/data",
+              "RANGE_READ_TOKEN": "${RANGE_READ_TOKEN}",
+              "WORKER_ID": "payment-worker-b",
+              "WORKLOAD_SECRET": "${WORKER_B_SECRET}",
+            },
+          "depends_on": ["range"],
+        },
+      "live-worker-hidden":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "worker",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "live",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://live-checkout:4100",
+              "GATEWAY_URL": "http://live-gateway:4100",
+              "LEDGER_URL": "http://live-ledger:4100",
+              "DATA_DIR": "/data",
+              "RANGE_READ_TOKEN": "${RANGE_READ_TOKEN}",
+              "WORKER_ID": "payment-worker-hidden",
+              "WORKLOAD_SECRET": "${WORKER_HIDDEN_SECRET}",
+            },
+          "depends_on": ["range"],
+        },
+      "live-load":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "load",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "live",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://live-checkout:4100",
+              "GATEWAY_URL": "http://live-gateway:4100",
+              "LEDGER_URL": "http://live-ledger:4100",
+              "DATA_DIR": "/data",
+              "OBSERVATION_TOKEN": "${OBSERVATION_TOKEN}",
+            },
+          "depends_on": ["range"],
+        },
+      "live-attacker":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "attacker",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "live",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://live-checkout:4100",
+              "GATEWAY_URL": "http://live-gateway:4100",
+              "LEDGER_URL": "http://live-ledger:4100",
+              "DATA_DIR": "/data",
+              "OBSERVATION_TOKEN": "${OBSERVATION_TOKEN}",
+            },
+          "depends_on": ["range"],
+        },
+      "counterfactual-checkout":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "checkout",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "counterfactual",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://counterfactual-checkout:4100",
+              "GATEWAY_URL": "http://counterfactual-gateway:4100",
+              "LEDGER_URL": "http://counterfactual-ledger:4100",
+              "DATA_DIR": "/data",
+              "RANGE_READ_TOKEN": "${RANGE_READ_TOKEN}",
+              "WORKER_URLS": '{"payment-worker-a": "http://counterfactual-worker-a:4100", "payment-worker-b": "http://counterfactual-worker-b:4100", "payment-worker-hidden": "http://counterfactual-worker-hidden:4100"}',
+            },
+          "depends_on": ["range"],
+        },
+      "counterfactual-gateway":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "gateway",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "counterfactual",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://counterfactual-checkout:4100",
+              "GATEWAY_URL": "http://counterfactual-gateway:4100",
+              "LEDGER_URL": "http://counterfactual-ledger:4100",
+              "DATA_DIR": "/data",
+              "RANGE_READ_TOKEN": "${RANGE_READ_TOKEN}",
+              "LEDGER_TOKEN": "${LEDGER_TOKEN}",
+              "WORKLOAD_SECRETS": '{"payment-worker-a": "${WORKER_A_SECRET}", "payment-worker-b": "${WORKER_B_SECRET}", "payment-worker-hidden": "${WORKER_HIDDEN_SECRET}"}',
+            },
+          "depends_on": ["range"],
+        },
+      "counterfactual-ledger":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "ledger",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "counterfactual",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://counterfactual-checkout:4100",
+              "GATEWAY_URL": "http://counterfactual-gateway:4100",
+              "LEDGER_URL": "http://counterfactual-ledger:4100",
+              "DATA_DIR": "/data",
+              "LEDGER_TOKEN": "${LEDGER_TOKEN}",
+            },
+          "depends_on": ["range"],
+          "volumes": ["counterfactual-ledger:/data"],
+        },
+      "counterfactual-worker-a":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "worker",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "counterfactual",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://counterfactual-checkout:4100",
+              "GATEWAY_URL": "http://counterfactual-gateway:4100",
+              "LEDGER_URL": "http://counterfactual-ledger:4100",
+              "DATA_DIR": "/data",
+              "RANGE_READ_TOKEN": "${RANGE_READ_TOKEN}",
+              "WORKER_ID": "payment-worker-a",
+              "WORKLOAD_SECRET": "${WORKER_A_SECRET}",
+            },
+          "depends_on": ["range"],
+        },
+      "counterfactual-worker-b":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "worker",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "counterfactual",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://counterfactual-checkout:4100",
+              "GATEWAY_URL": "http://counterfactual-gateway:4100",
+              "LEDGER_URL": "http://counterfactual-ledger:4100",
+              "DATA_DIR": "/data",
+              "RANGE_READ_TOKEN": "${RANGE_READ_TOKEN}",
+              "WORKER_ID": "payment-worker-b",
+              "WORKLOAD_SECRET": "${WORKER_B_SECRET}",
+            },
+          "depends_on": ["range"],
+        },
+      "counterfactual-worker-hidden":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "worker",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "counterfactual",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://counterfactual-checkout:4100",
+              "GATEWAY_URL": "http://counterfactual-gateway:4100",
+              "LEDGER_URL": "http://counterfactual-ledger:4100",
+              "DATA_DIR": "/data",
+              "RANGE_READ_TOKEN": "${RANGE_READ_TOKEN}",
+              "WORKER_ID": "payment-worker-hidden",
+              "WORKLOAD_SECRET": "${WORKER_HIDDEN_SECRET}",
+            },
+          "depends_on": ["range"],
+        },
+      "counterfactual-load":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "load",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "counterfactual",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://counterfactual-checkout:4100",
+              "GATEWAY_URL": "http://counterfactual-gateway:4100",
+              "LEDGER_URL": "http://counterfactual-ledger:4100",
+              "DATA_DIR": "/data",
+              "OBSERVATION_TOKEN": "${OBSERVATION_TOKEN}",
+            },
+          "depends_on": ["range"],
+        },
+      "counterfactual-attacker":
+        {
+          "build":
+            {
+              "context": ".",
+              "dockerfile": "Dockerfile.range",
+              "target": "mesh",
+            },
+          "environment":
+            {
+              "SERVICE_ROLE": "attacker",
+              "SERVICE_PORT": "4100",
+              "SERVICE_HOST": "0.0.0.0",
+              "RANGE_SCOPE": "counterfactual",
+              "CONTROLLER_URL": "http://range:3002",
+              "CHECKOUT_URL": "http://counterfactual-checkout:4100",
+              "GATEWAY_URL": "http://counterfactual-gateway:4100",
+              "LEDGER_URL": "http://counterfactual-ledger:4100",
+              "DATA_DIR": "/data",
+              "OBSERVATION_TOKEN": "${OBSERVATION_TOKEN}",
+            },
+          "depends_on": ["range"],
+        },
+    },
+  "networks": { "default": { "internal": true }, "control": {} },
+  "volumes":
+    { "range-state": {}, "live-ledger": {}, "counterfactual-ledger": {} },
+}

@@ -1,3 +1,11 @@
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  mkdirSync,
+} from "node:fs";
+import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import type {
   ActionProposal,
@@ -24,6 +32,10 @@ type RangeState = {
   trafficWorkerId: string;
   ledgerEnabled: boolean;
   transactionIds: Set<string>;
+  trustedGateway: boolean;
+  attackActive: boolean;
+  environment: "production" | "staging";
+  failedWorkerIds: string[];
 };
 
 const originalState = (scenarioVersion = 1): RangeState => ({
@@ -50,6 +62,10 @@ const originalState = (scenarioVersion = 1): RangeState => ({
   trafficWorkerId: "payment-worker-a",
   ledgerEnabled: true,
   transactionIds: new Set(),
+  trustedGateway: true,
+  attackActive: true,
+  environment: "production",
+  failedWorkerIds: [],
 });
 
 type IdempotentMutation = {
@@ -74,6 +90,34 @@ export class RangeController {
   private state = originalState();
   private readonly mutations = new Map<string, IdempotentMutation>();
 
+  constructor(private readonly storagePath?: string) {
+    if (storagePath && existsSync(storagePath)) {
+      const saved = JSON.parse(readFileSync(storagePath, "utf8"));
+      this.state = {
+        ...saved.state,
+        transactionIds: new Set(saved.state.transactionIds),
+      };
+      for (const [key, value] of saved.mutations)
+        this.mutations.set(key, value);
+    }
+  }
+  private persist(): void {
+    if (!this.storagePath) return;
+    mkdirSync(dirname(this.storagePath), { recursive: true });
+    writeFileSync(
+      this.storagePath + ".tmp",
+      JSON.stringify({
+        state: {
+          ...this.state,
+          transactionIds: [...this.state.transactionIds],
+        },
+        mutations: [...this.mutations],
+      }),
+      { mode: 0o600 },
+    );
+    renameSync(this.storagePath + ".tmp", this.storagePath);
+  }
+
   snapshot(): RangeSnapshot {
     return {
       scenarioVersion: this.state.scenarioVersion,
@@ -82,12 +126,52 @@ export class RangeController {
       hostileSessionsInvalidated: this.state.hostileSessionsInvalidated,
       credentialState: this.state.credentialState,
       activeCredentialId: this.state.activeCredentialId,
+      trustedGateway: this.state.trustedGateway,
+      attackActive: this.state.attackActive,
+      environment: this.state.environment,
+      trafficWorkerId: this.state.trafficWorkerId,
+      ledgerEnabled: this.state.ledgerEnabled,
+      failedWorkerIds: [...this.state.failedWorkerIds],
+      observedAt: new Date().toISOString(),
       workers: this.state.workers.map((worker) => ({ ...worker })),
     };
   }
 
   reset(): RangeSnapshot {
     this.state = originalState(this.state.scenarioVersion + 1);
+    this.persist();
+    return this.snapshot();
+  }
+
+  restore(snapshot: RangeSnapshot): RangeSnapshot {
+    this.state = {
+      ...originalState(),
+      ...structuredClone(snapshot),
+      transactionIds: new Set(),
+    };
+    return this.snapshot();
+  }
+
+  configure(variant: string): RangeSnapshot {
+    if (variant === "no-gateway") this.state.trustedGateway = false;
+    else if (variant === "failed-standby")
+      this.state.failedWorkerIds = ["payment-worker-b"];
+    else if (variant === "hidden-consumer")
+      this.state.workers.push({
+        id: "payment-worker-hidden",
+        credentialId: "payments-key-v1",
+        active: true,
+        verified: false,
+      });
+    else if (variant === "staging") {
+      this.state.environment = "staging";
+      this.state.workers.forEach((worker) => (worker.active = false));
+    } else if (variant === "healthy") this.state.attackActive = false;
+    else if (variant === "attack") this.state.attackActive = true;
+    else if (variant !== "production")
+      throw new Error("Unknown scenario variant.");
+    this.state.scenarioVersion++;
+    this.persist();
     return this.snapshot();
   }
 
@@ -125,7 +209,8 @@ export class RangeController {
   }
 
   attackerProbe(runId: string): ProbeResult {
-    const success = this.state.credentialState === "ACTIVE";
+    const success =
+      this.state.attackActive && this.state.credentialState === "ACTIVE";
     return {
       probeId: randomUUID(),
       runId,
@@ -196,6 +281,8 @@ export class RangeController {
       case "quarantine_credential":
         this.requireTarget(proposal, "payments-key-v1");
         this.requireCredentialState("ACTIVE");
+        if (!this.state.trustedGateway)
+          throw new Error("Trusted quarantine gateway unavailable.");
         this.state.credentialState = "QUARANTINED";
         return this.changed({
           credentialId: proposal.targetId,
@@ -243,6 +330,7 @@ export class RangeController {
     }
     const outcome = mutate();
     this.mutations.set(idempotencyKey, { fingerprint, outcome });
+    this.persist();
     return outcome;
   }
 
@@ -267,6 +355,8 @@ export class RangeController {
     if (worker.credentialId !== "payments-key-v2") {
       throw new Error("Consumer is not using the replacement credential.");
     }
+    if (this.state.failedWorkerIds.includes(consumerId))
+      throw new Error("Consumer probe failed.");
     worker.verified = true;
     return this.changed({ consumerId, verified: true });
   }
@@ -351,6 +441,9 @@ export type RangeClient = {
   attackerProbe(runId: string): Promise<ProbeResult>;
   ledgerProbe(runId: string): Promise<ProbeResult>;
   reset(): Promise<RangeSnapshot>;
+  configure(variant: string): Promise<RangeSnapshot>;
+  metrics(): Promise<Record<string, unknown>>;
+  cloneCounterfactual(snapshot: RangeSnapshot): Promise<RangeSnapshot>;
   counterfactualSnapshot(): Promise<RangeSnapshot>;
   counterfactualMutate(
     proposal: ActionProposal,
@@ -372,6 +465,7 @@ export function createRangeClient(
   ): Promise<T> => {
     const response = await fetch(`${baseUrl}${path}`, {
       ...init,
+      signal: AbortSignal.timeout(15000),
       headers: {
         "x-range-broker-token": brokerToken,
         ...(init.body === undefined
@@ -393,6 +487,17 @@ export function createRangeClient(
 
   return {
     snapshot: () => request<RangeSnapshot>("/snapshot"),
+    configure: (variant) =>
+      request<RangeSnapshot>("/admin/configure", {
+        method: "POST",
+        body: JSON.stringify({ variant }),
+      }),
+    metrics: () => request<Record<string, unknown>>("/metrics"),
+    cloneCounterfactual: (snapshot) =>
+      request<RangeSnapshot>("/counterfactual/admin/restore", {
+        method: "POST",
+        body: JSON.stringify({ snapshot }),
+      }),
     mutate: (proposal, idempotencyKey) =>
       request<MutationOutcome>("/admin/mutate", {
         method: "POST",

@@ -162,6 +162,13 @@ export const RangeSnapshotSchema = z.object({
   hostileSessionsInvalidated: z.boolean(),
   credentialState: z.enum(["ACTIVE", "QUARANTINED", "REVOKED"]),
   activeCredentialId: z.string().min(1),
+  trustedGateway: z.boolean().default(true),
+  attackActive: z.boolean().default(true),
+  environment: z.enum(["production", "staging"]).default("production"),
+  trafficWorkerId: z.string().default("payment-worker-a"),
+  ledgerEnabled: z.boolean().default(true),
+  failedWorkerIds: z.array(z.string()).default([]),
+  observedAt: z.string().optional(),
   workers: z.array(
     z.object({
       id: z.string().min(1),
