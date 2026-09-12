@@ -23,7 +23,7 @@ The core recovery-and-learning loop is verified. The project is ready for a narr
 - [Docker range proof](evidence/range-proof.json): independent HTTP requests demonstrate copied-key access after device isolation, same-snapshot counterfactual outage, quarantine continuity, migration, final revocation and ledger checks.
 - [Broker integration proof](evidence/broker-proof.json): seven acceptance groups cover authentication, zero-receipt revision, poisoning/staleness, changed history, four environment variants, exact arguments/idempotency and stale approvals.
 
-Reports contain the observations available at export; request counters explicitly carry their observation window. They do not assert zero failures outside that window. Fictional seeded histories are examples, not production incident data. The video is an event replay with compressed timing, not a screen capture or a newly running agent.
+Reports contain the observations available at export; request counters explicitly carry their observation window. They do not assert zero failures outside that window. Fictional seeded histories are examples, not production incident data. The video captures the product’s dashboard replay of saved events with compressed timing; it does not claim a newly running agent.
 
 ## Validation and limits
 

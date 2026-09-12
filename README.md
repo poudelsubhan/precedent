@@ -12,7 +12,7 @@ The local demonstration runs real HTTP payment and attacker requests against a c
 
 > Check the context. Explain the decision. Verify the outcome.
 
-[Silent 2:40 recorded demo](docs/media/recorded-demo.mp4) · [Your narration script](docs/demo-script.md) · [Build evidence](docs/build-audit.md) · [Design decisions](docs/design-principles.md)
+[2:40 dashboard demo](docs/media/recorded-demo.mp4) · [Your narration script](docs/demo-script.md) · [Build evidence](docs/build-audit.md) · [Design decisions](docs/design-principles.md)
 
 ## How it works
 
@@ -111,6 +111,8 @@ node scripts/run-broker-proof.mjs
 ```
 
 The controller listens on `127.0.0.1:3102`. Service traffic stays on Docker's internal network. To connect the normal broker to this range, set `RANGE_URL=http://127.0.0.1:3102` and use the range token generated in `.env.range`. Keep both environment files private. The broker proof temporarily uses the configured fictional Neo4j fixtures; run it while no agent incident is active.
+
+The [dashboard replay](http://localhost:3000/demo) replays the verified runs inside the product, with a service graph, action stream, decision inspector and source view. The live controls remain at [localhost:3000](http://localhost:3000).
 
 ## Try the demo
 
