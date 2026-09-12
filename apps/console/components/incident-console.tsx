@@ -7,7 +7,7 @@ import {
   type Edge,
   type Node,
 } from "@xyflow/react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const brokerUrl = process.env.NEXT_PUBLIC_BROKER_URL ?? "http://localhost:3001";
 const runnerUrl = process.env.NEXT_PUBLIC_RUNNER_URL ?? "http://localhost:3003";
@@ -162,6 +162,8 @@ const initialDashboard: Dashboard = {
   policies: [],
 };
 
+const retainedEventIdLimit = 200;
+
 const positions: Record<string, { x: number; y: number }> = {
   "compromised-laptop": { x: 30, y: 60 },
   "attacker-process": { x: 30, y: 250 },
@@ -266,7 +268,10 @@ function eventSummary(event: EventEnvelope): string {
   }
   const probe = probeForEvent(event);
   if (probe) {
-    return `${probe.probeClass.replaceAll("_", " ")} ${probe.success ? "observed success" : "observed failure"}`;
+    const outcome = probe.success ? "success" : "failure";
+    const measurement =
+      event.origin === "COUNTERFACTUAL" ? "projected" : "observed";
+    return `${probe.probeClass.replaceAll("_", " ")} ${measurement} ${outcome}`;
   }
   if (typeof event.payload.summary === "string") {
     return event.payload.summary;
@@ -302,6 +307,7 @@ export function IncidentConsole() {
   const [showWhy, setShowWhy] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const seenEventIds = useRef(new Set<string>());
 
   const loadDashboard = useCallback(async () => {
     try {
@@ -359,6 +365,16 @@ export function IncidentConsole() {
         const event = JSON.parse(
           (message as MessageEvent<string>).data,
         ) as EventEnvelope;
+        if (seenEventIds.current.has(event.eventId)) {
+          return;
+        }
+        seenEventIds.current.add(event.eventId);
+        if (seenEventIds.current.size > retainedEventIdLimit) {
+          const oldestEventId = seenEventIds.current.values().next().value;
+          if (oldestEventId) {
+            seenEventIds.current.delete(oldestEventId);
+          }
+        }
         setEvents((current) => [event, ...current].slice(0, 100));
         const evaluation = payloadEvaluation(event);
         if (evaluation) {
@@ -584,9 +600,17 @@ export function IncidentConsole() {
     return { nodes, edges };
   }, [dashboard, decision, graphView, selectedEdgeIds, selectedNodeIds]);
 
-  const paymentProbe = latestProbe(events, "LEGITIMATE_PAYMENT");
-  const attackerProbe = latestProbe(events, "ATTACKER");
-  const ledgerProbe = latestProbe(events, "LEDGER");
+  const observedEvents = useMemo(
+    () =>
+      events.filter(
+        (event) =>
+          event.origin === "LIVE_AGENT" && event.runId === currentRunId,
+      ),
+    [currentRunId, events],
+  );
+  const paymentProbe = latestProbe(observedEvents, "LEGITIMATE_PAYMENT");
+  const attackerProbe = latestProbe(observedEvents, "ATTACKER");
+  const ledgerProbe = latestProbe(observedEvents, "LEDGER");
 
   return (
     <main className="console-shell">
@@ -730,7 +754,9 @@ export function IncidentConsole() {
               </ReactFlow>
             ) : (
               <div className="graph-empty">
-                Load an incident decision to inspect its graph evidence.
+                {graphView === "PROVENANCE" && decision
+                  ? "No evidence provenance is available for this decision."
+                  : "Load an incident decision to inspect its graph evidence."}
               </div>
             )}
           </div>
@@ -938,7 +964,13 @@ function Metric({
   failureText: string;
   inverse?: boolean;
 }) {
-  const healthy = probe ? (inverse ? !probe.success : probe.success) : null;
+  const observedSuccess = probe?.success ?? null;
+  const healthy =
+    observedSuccess === null
+      ? null
+      : inverse
+        ? !observedSuccess
+        : observedSuccess;
   return (
     <div className="metric-card">
       <span className="metric-label">{label}</span>
@@ -950,9 +982,9 @@ function Metric({
         {healthy === null ? "—" : healthy ? "PASS" : "FAIL"}
       </strong>
       <span className="metric-caption">
-        {healthy === null
+        {observedSuccess === null
           ? "awaiting independent probe"
-          : healthy
+          : observedSuccess
             ? successText
             : failureText}
       </span>

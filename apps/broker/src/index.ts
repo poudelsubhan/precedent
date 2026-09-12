@@ -9,6 +9,7 @@ import {
   type ActionAuthorization,
   type ActionProposal,
   type Evaluation,
+  type ExecutionIntent,
   type ExecutionReceipt,
   type RangeSnapshot,
   type RunOrigin,
@@ -20,10 +21,16 @@ import { createRangeClient } from "@precedent/range";
 
 config({ path: fileURLToPath(new URL("../../../.env", import.meta.url)) });
 
-const brokerToken =
-  process.env.BROKER_RUNNER_TOKEN ?? "precedent-local-runner-token";
-const rangeToken =
-  process.env.RANGE_BROKER_TOKEN ?? "precedent-local-range-token";
+const requiredEnvironment = (name: string): string => {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`${name} must be configured.`);
+  }
+  return value;
+};
+
+const brokerToken = requiredEnvironment("BROKER_RUNNER_TOKEN");
+const rangeToken = requiredEnvironment("RANGE_BROKER_TOKEN");
 const rangeUrl = process.env.RANGE_URL ?? "http://127.0.0.1:3002";
 const consoleUrl = process.env.CONSOLE_URL ?? "http://localhost:3000";
 const graph = GraphRepository.fromEnvironment();
@@ -31,12 +38,6 @@ const evaluator = new PrecedentEvaluator(graph);
 const range = createRangeClient(rangeUrl, rangeToken);
 const server = Fastify({ logger: true });
 
-const authorizations = new Map<string, ActionAuthorization>();
-const evaluations = new Map<
-  string,
-  { evaluation: Evaluation; proposal: ActionProposal }
->();
-const receipts = new Map<string, ExecutionReceipt>();
 const promotedRunIds = new Set<string>();
 let mutationQueue = Promise.resolve();
 
@@ -68,6 +69,42 @@ const argumentHash = (proposal: ActionProposal): string =>
       }),
     )
     .digest("hex");
+
+const matchesAuthorization = (
+  authorization: ActionAuthorization,
+  authorizedProposal: ActionProposal,
+  proposal: ActionProposal,
+  toolCallId: string,
+): boolean =>
+  authorization.proposalId === proposal.proposalId &&
+  authorization.runId === proposal.runId &&
+  authorization.toolCallId === toolCallId &&
+  authorization.actionType === proposal.actionType &&
+  authorization.targetId === proposal.targetId &&
+  authorization.argumentHash === argumentHash(proposal) &&
+  canonicalize(authorizedProposal) === canonicalize(proposal);
+
+const receiptFor = (
+  intent: ExecutionIntent,
+  status: ExecutionReceipt["status"],
+  details: Record<string, unknown>,
+  receiptId: string = randomUUID(),
+): ExecutionReceipt => ({
+  receiptId,
+  authorizationId: intent.authorizationId,
+  proposalId: intent.proposalId,
+  runId: intent.runId,
+  actionType: intent.actionType,
+  targetId: intent.targetId,
+  idempotencyKey: intent.idempotencyKey,
+  status,
+  executedAt: new Date().toISOString(),
+  details,
+});
+
+const isAmbiguousTransportFailure = (error: unknown): boolean =>
+  error instanceof TypeError ||
+  (error as { name?: string }).name === "AbortError";
 
 const runnerOnly = async (request: {
   headers: Record<string, string | string[] | undefined>;
@@ -240,7 +277,7 @@ server.get("/events", async (request, reply) => {
 server.get("/api/decisions/:evaluationId", async (request) => {
   const evaluationId = (request.params as { evaluationId: string })
     .evaluationId;
-  const record = evaluations.get(evaluationId);
+  const record = await graph.findEvaluation(evaluationId);
   if (!record) {
     throw Object.assign(new Error("Decision not found."), { statusCode: 404 });
   }
@@ -248,9 +285,7 @@ server.get("/api/decisions/:evaluationId", async (request) => {
     proposal: record.proposal,
     evaluation: record.evaluation,
     trace: await decisionTrace(record.proposal, record.evaluation),
-    receipts: [...receipts.values()].filter(
-      (receipt) => receipt.proposalId === record.proposal.proposalId,
-    ),
+    receipts: await graph.receiptsForProposal(record.proposal.proposalId),
   };
 });
 
@@ -335,7 +370,7 @@ server.post("/api/replays/h41", { preHandler: runnerOnly }, async (request) => {
   }
   const proposal = historicalH41Proposal(body.runId);
   const evaluation = await evaluator.evaluate(proposal, await currentRange());
-  evaluations.set(evaluation.evaluationId, { proposal, evaluation });
+  await graph.recordEvaluation(evaluation, proposal);
   publish(body.runId, "HISTORICAL_REPLAY", "ACTION_PROPOSED", {
     proposal,
     historicalCaseId: "H41",
@@ -379,7 +414,7 @@ server.post(
         "Injected runbook claims approval to disable the ledger service.",
     });
     const evaluation = await evaluator.evaluate(proposal, await currentRange());
-    evaluations.set(evaluation.evaluationId, { proposal, evaluation });
+    await graph.recordEvaluation(evaluation, proposal);
     const evidence = await graph.evidenceLineage(["forged-runbook"]);
     publish(body.runId, origin, "ACTION_PROPOSED", {
       proposal,
@@ -465,7 +500,7 @@ server.post("/api/evaluate", { preHandler: runnerOnly }, async (request) => {
   const origin = asOrigin(body.origin);
   const snapshot = await currentRange();
   const evaluation = await evaluator.evaluate(proposal, snapshot);
-  evaluations.set(evaluation.evaluationId, { evaluation, proposal });
+  await graph.recordEvaluation(evaluation, proposal);
   publish(proposal.runId, origin, "ACTION_PROPOSED", { proposal });
   publish(proposal.runId, origin, "EVALUATION_CREATED", { evaluation });
   if (evaluation.rejectedEvidenceIds.length > 0) {
@@ -500,7 +535,7 @@ server.post("/api/evaluate", { preHandler: runnerOnly }, async (request) => {
     expiresAt: evaluation.expiresAt,
     consumedAt: null,
   };
-  authorizations.set(authorization.authorizationId, authorization);
+  await graph.recordAuthorization(authorization, proposal);
   return { evaluation, authorization };
 });
 
@@ -508,32 +543,29 @@ server.post("/api/execute", { preHandler: runnerOnly }, async (request) => {
   const executionRequest = BrokerExecutionRequestSchema.parse(request.body);
   const origin = asOrigin((request.body as { origin?: unknown }).origin);
   return runMutation(async () => {
-    const authorization = authorizations.get(executionRequest.authorizationId);
-    if (!authorization) {
+    const authorizedAction = await graph.findAuthorizedAction(
+      executionRequest.authorizationId,
+    );
+    if (!authorizedAction) {
       throw Object.assign(new Error("Authorization does not exist."), {
         statusCode: 403,
       });
     }
-    if (authorization.consumedAt) {
+    if (authorizedAction.evaluation.verdict !== "ALLOW") {
       throw Object.assign(
-        new Error("Authorization has already been consumed."),
+        new Error("Execution requires an allowed evaluation."),
         {
-          statusCode: 409,
+          statusCode: 403,
         },
       );
     }
-    if (new Date(authorization.expiresAt).getTime() <= Date.now()) {
-      throw Object.assign(new Error("Authorization has expired."), {
-        statusCode: 403,
-      });
-    }
     if (
-      authorization.proposalId !== executionRequest.proposal.proposalId ||
-      authorization.runId !== executionRequest.proposal.runId ||
-      authorization.toolCallId !== executionRequest.toolCallId ||
-      authorization.actionType !== executionRequest.proposal.actionType ||
-      authorization.targetId !== executionRequest.proposal.targetId ||
-      authorization.argumentHash !== argumentHash(executionRequest.proposal)
+      !matchesAuthorization(
+        authorizedAction.authorization,
+        authorizedAction.proposal,
+        executionRequest.proposal,
+        executionRequest.toolCallId,
+      )
     ) {
       throw Object.assign(
         new Error("Authorization does not match the requested action."),
@@ -543,20 +575,27 @@ server.post("/api/execute", { preHandler: runnerOnly }, async (request) => {
       );
     }
 
-    const evaluationRecord = evaluations.get(authorization.evaluationId);
-    if (!evaluationRecord || evaluationRecord.evaluation.verdict !== "ALLOW") {
-      throw Object.assign(
-        new Error("Execution requires an allowed evaluation."),
-        {
-          statusCode: 403,
-        },
-      );
+    let intentRecord = await graph.findExecutionIntent(
+      authorizedAction.authorization.authorizationId,
+    );
+    if (
+      intentRecord?.receipt?.status === "SUCCEEDED" ||
+      intentRecord?.receipt?.status === "FAILED"
+    ) {
+      return {
+        receipt: intentRecord.receipt,
+        snapshot:
+          intentRecord.receipt.status === "SUCCEEDED"
+            ? await currentRange()
+            : null,
+      };
     }
 
     const snapshot = await currentRange();
     if (
-      snapshot.scenarioVersion !== authorization.scenarioVersion ||
-      snapshot.policyVersion !== authorization.policyVersion
+      snapshot.scenarioVersion !==
+        authorizedAction.authorization.scenarioVersion ||
+      snapshot.policyVersion !== authorizedAction.authorization.policyVersion
     ) {
       throw Object.assign(
         new Error("Range state changed; reevaluation is required."),
@@ -566,40 +605,88 @@ server.post("/api/execute", { preHandler: runnerOnly }, async (request) => {
       );
     }
 
-    const idempotencyKey = randomUUID();
-    authorization.consumedAt = new Date().toISOString();
-    publish(
-      executionRequest.proposal.runId,
-      origin,
-      "ACTION_EXECUTION_INTENDED",
-      {
-        proposalId: executionRequest.proposal.proposalId,
-        authorizationId: authorization.authorizationId,
-        idempotencyKey,
-      },
-    );
+    if (!intentRecord) {
+      if (
+        new Date(authorizedAction.authorization.expiresAt).getTime() <=
+        Date.now()
+      ) {
+        throw Object.assign(new Error("Authorization has expired."), {
+          statusCode: 403,
+        });
+      }
+      const intent: ExecutionIntent = {
+        intentId: authorizedAction.authorization.authorizationId,
+        authorizationId: authorizedAction.authorization.authorizationId,
+        proposalId: authorizedAction.proposal.proposalId,
+        runId: authorizedAction.proposal.runId,
+        actionType: authorizedAction.proposal.actionType,
+        targetId: authorizedAction.proposal.targetId,
+        idempotencyKey: randomUUID(),
+        createdAt: new Date().toISOString(),
+      };
+      const claimedIntent = await graph.claimExecutionIntent(
+        intent,
+        new Date().toISOString(),
+      );
+      if (claimedIntent) {
+        intentRecord = { intent: claimedIntent, receipt: null };
+        if (claimedIntent.idempotencyKey === intent.idempotencyKey) {
+          publish(
+            authorizedAction.proposal.runId,
+            origin,
+            "ACTION_EXECUTION_INTENDED",
+            {
+              proposalId: authorizedAction.proposal.proposalId,
+              authorizationId: authorizedAction.authorization.authorizationId,
+              idempotencyKey: claimedIntent.idempotencyKey,
+            },
+          );
+        }
+      } else {
+        intentRecord = await graph.findExecutionIntent(
+          authorizedAction.authorization.authorizationId,
+        );
+        if (!intentRecord) {
+          throw Object.assign(
+            new Error("Authorization has already been consumed."),
+            {
+              statusCode: 409,
+            },
+          );
+        }
+      }
+    }
 
+    if (
+      intentRecord.receipt?.status === "SUCCEEDED" ||
+      intentRecord.receipt?.status === "FAILED"
+    ) {
+      return {
+        receipt: intentRecord.receipt,
+        snapshot:
+          intentRecord.receipt.status === "SUCCEEDED"
+            ? await currentRange()
+            : null,
+      };
+    }
+
+    const { intent, receipt: previousReceipt } = intentRecord;
+    let mutationApplied = false;
     try {
       const outcome = await range.mutate(
-        executionRequest.proposal,
-        idempotencyKey,
+        authorizedAction.proposal,
+        intent.idempotencyKey,
       );
+      mutationApplied = true;
       const currentSnapshot = await range.snapshot();
       await graph.syncRange(currentSnapshot);
-      const receipt: ExecutionReceipt = {
-        receiptId: randomUUID(),
-        authorizationId: authorization.authorizationId,
-        proposalId: executionRequest.proposal.proposalId,
-        runId: executionRequest.proposal.runId,
-        actionType: executionRequest.proposal.actionType,
-        targetId: executionRequest.proposal.targetId,
-        idempotencyKey,
-        status: "SUCCEEDED",
-        executedAt: new Date().toISOString(),
-        details: outcome.details,
-      };
-      receipts.set(receipt.receiptId, receipt);
-      await graph.recordReceipt(receipt);
+      const receipt = receiptFor(
+        intent,
+        "SUCCEEDED",
+        outcome.details,
+        previousReceipt?.receiptId,
+      );
+      await graph.recordReceipt(intent.intentId, receipt);
       publish(receipt.runId, origin, "ACTION_EXECUTED", { receipt });
       try {
         await verifyAndPromoteRecovery(receipt.runId, origin, currentSnapshot);
@@ -611,37 +698,31 @@ server.post("/api/execute", { preHandler: runnerOnly }, async (request) => {
       }
       return { receipt, snapshot: currentSnapshot };
     } catch (error) {
-      const ambiguous =
-        error instanceof TypeError ||
-        (error as { name?: string }).name === "AbortError";
-      const receipt: ExecutionReceipt = {
-        receiptId: randomUUID(),
-        authorizationId: authorization.authorizationId,
-        proposalId: executionRequest.proposal.proposalId,
-        runId: executionRequest.proposal.runId,
-        actionType: executionRequest.proposal.actionType,
-        targetId: executionRequest.proposal.targetId,
-        idempotencyKey,
-        status: ambiguous ? "UNKNOWN" : "FAILED",
-        executedAt: new Date().toISOString(),
-        details: {
+      const ambiguous = mutationApplied || isAmbiguousTransportFailure(error);
+      const receipt = receiptFor(
+        intent,
+        ambiguous ? "UNKNOWN" : "FAILED",
+        {
           message: error instanceof Error ? error.message : "Execution failed.",
         },
-      };
-      receipts.set(receipt.receiptId, receipt);
-      await graph.recordReceipt(receipt);
+        previousReceipt?.receiptId,
+      );
+      try {
+        await graph.recordReceipt(intent.intentId, receipt);
+      } catch (persistenceError) {
+        server.log.error(
+          persistenceError,
+          "Execution receipt could not be persisted for recovery.",
+        );
+        throw error;
+      }
       publish(
         receipt.runId,
         origin,
         ambiguous ? "ACTION_UNKNOWN" : "ACTION_EXECUTED",
-        {
-          receipt,
-        },
+        { receipt },
       );
-      if (ambiguous) {
-        return { receipt, snapshot: null };
-      }
-      throw error;
+      return { receipt, snapshot: null };
     }
   });
 });
@@ -651,13 +732,15 @@ server.post("/api/range/reset", { preHandler: runnerOnly }, async (request) => {
   if (!body.runId) {
     throw Object.assign(new Error("runId is required."), { statusCode: 400 });
   }
-  const snapshot = await range.reset();
-  await graph.syncRange(snapshot);
-  publish(body.runId, asOrigin(body.origin), "RANGE_RESET", {
-    snapshot,
-    memoryPreserved: true,
+  return runMutation(async () => {
+    const snapshot = await range.reset();
+    await graph.syncRange(snapshot);
+    publish(body.runId as string, asOrigin(body.origin), "RANGE_RESET", {
+      snapshot,
+      memoryPreserved: true,
+    });
+    return snapshot;
   });
-  return snapshot;
 });
 
 server.setErrorHandler((error, _request, reply) => {

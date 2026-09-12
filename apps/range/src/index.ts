@@ -26,8 +26,8 @@ type RangeState = {
   transactionIds: Set<string>;
 };
 
-const originalState = (): RangeState => ({
-  scenarioVersion: 1,
+const originalState = (scenarioVersion = 1): RangeState => ({
+  scenarioVersion,
   policyVersion: 1,
   compromisedDeviceIsolated: false,
   hostileSessionsInvalidated: false,
@@ -52,8 +52,27 @@ const originalState = (): RangeState => ({
   transactionIds: new Set(),
 });
 
+type IdempotentMutation = {
+  fingerprint: string;
+  outcome: MutationOutcome;
+};
+
+const canonicalize = (value: unknown): string => {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalize).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => `${JSON.stringify(key)}:${canonicalize(nested)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+};
+
 export class RangeController {
   private state = originalState();
+  private readonly mutations = new Map<string, IdempotentMutation>();
 
   snapshot(): RangeSnapshot {
     return {
@@ -68,7 +87,7 @@ export class RangeController {
   }
 
   reset(): RangeSnapshot {
-    this.state = originalState();
+    this.state = originalState(this.state.scenarioVersion + 1);
     return this.snapshot();
   }
 
@@ -135,7 +154,36 @@ export class RangeController {
     };
   }
 
-  mutate(proposal: ActionProposal): MutationOutcome {
+  mutate(proposal: ActionProposal, idempotencyKey: string): MutationOutcome {
+    return this.withIdempotency(proposal, idempotencyKey, () =>
+      this.applyMutation(proposal),
+    );
+  }
+
+  counterfactualMutate(
+    proposal: ActionProposal,
+    idempotencyKey: string,
+  ): MutationOutcome {
+    return this.withIdempotency(proposal, idempotencyKey, () => {
+      if (
+        proposal.actionType !== "revoke_credential" ||
+        proposal.targetId !== "payments-key-v1"
+      ) {
+        throw new Error(
+          "The comparison range only models immediate old-credential revocation.",
+        );
+      }
+      this.state.credentialState = "REVOKED";
+      return this.changed({
+        credentialId: proposal.targetId,
+        state: "REVOKED",
+        projected: true,
+        bypassedContinuityGuard: true,
+      });
+    });
+  }
+
+  private applyMutation(proposal: ActionProposal): MutationOutcome {
     switch (proposal.actionType) {
       case "isolate_device":
         this.requireTarget(proposal, "compromised-laptop");
@@ -175,22 +223,27 @@ export class RangeController {
     }
   }
 
-  counterfactualMutate(proposal: ActionProposal): MutationOutcome {
-    if (
-      proposal.actionType !== "revoke_credential" ||
-      proposal.targetId !== "payments-key-v1"
-    ) {
-      throw new Error(
-        "The comparison range only models immediate old-credential revocation.",
-      );
+  private withIdempotency(
+    proposal: ActionProposal,
+    idempotencyKey: string,
+    mutate: () => MutationOutcome,
+  ): MutationOutcome {
+    if (idempotencyKey.length === 0) {
+      throw new Error("idempotency-key is required.");
     }
-    this.state.credentialState = "REVOKED";
-    return this.changed({
-      credentialId: proposal.targetId,
-      state: "REVOKED",
-      projected: true,
-      bypassedContinuityGuard: true,
-    });
+    const fingerprint = canonicalize(proposal);
+    const existing = this.mutations.get(idempotencyKey);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        throw new Error(
+          "The idempotency key was reused for a different mutation.",
+        );
+      }
+      return existing.outcome;
+    }
+    const outcome = mutate();
+    this.mutations.set(idempotencyKey, { fingerprint, outcome });
+    return outcome;
   }
 
   private deployCredential(proposal: ActionProposal): MutationOutcome {

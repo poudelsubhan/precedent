@@ -1,10 +1,17 @@
 import neo4j, { type Driver } from "neo4j-driver";
-import type {
-  ActionProposal,
-  Evaluation,
-  ExecutionReceipt,
-  RangeSnapshot,
-  SupportingPath,
+import {
+  ActionAuthorizationSchema,
+  ActionProposalSchema,
+  EvaluationSchema,
+  ExecutionIntentSchema,
+  ExecutionReceiptSchema,
+  type ActionAuthorization,
+  type ActionProposal,
+  type Evaluation,
+  type ExecutionIntent,
+  type ExecutionReceipt,
+  type RangeSnapshot,
+  type SupportingPath,
 } from "@precedent/contracts";
 
 export type ActiveConsumer = {
@@ -42,6 +49,20 @@ export type EvidenceLineage = {
   contentHash: string;
 };
 
+export type DecisionRecord = {
+  proposal: ActionProposal;
+  evaluation: Evaluation;
+};
+
+export type AuthorizedAction = DecisionRecord & {
+  authorization: ActionAuthorization;
+};
+
+export type ExecutionIntentRecord = {
+  intent: ExecutionIntent;
+  receipt: ExecutionReceipt | null;
+};
+
 export type TopologyNode = {
   id: string;
   name: string;
@@ -77,6 +98,62 @@ type GraphConfig = {
 
 const asString = (value: unknown): string => String(value ?? "");
 const asBoolean = (value: unknown): boolean => value === true;
+const asNumber = (value: unknown): number =>
+  neo4j.isInt(value) ? value.toNumber() : Number(value);
+
+const json = <T>(value: unknown): T => JSON.parse(asString(value)) as T;
+
+const authorizationFromNode = (node: GraphNode): ActionAuthorization => {
+  const properties = node.properties;
+  return ActionAuthorizationSchema.parse({
+    authorizationId: nodeId(node),
+    evaluationId: asString(properties.evaluationId),
+    proposalId: asString(properties.proposalId),
+    runId: asString(properties.runId),
+    actorId: asString(properties.actorId),
+    toolCallId: asString(properties.toolCallId),
+    actionType: asString(properties.actionType),
+    targetId: asString(properties.targetId),
+    argumentHash: asString(properties.argumentHash),
+    scenarioVersion: asNumber(properties.scenarioVersion),
+    policyVersion: asNumber(properties.policyVersion),
+    expiresAt: asString(properties.expiresAt),
+    consumedAt:
+      properties.consumedAt === undefined
+        ? null
+        : asString(properties.consumedAt),
+  });
+};
+
+const intentFromNode = (node: GraphNode): ExecutionIntent => {
+  const properties = node.properties;
+  return ExecutionIntentSchema.parse({
+    intentId: nodeId(node),
+    authorizationId: asString(properties.authorizationId),
+    proposalId: asString(properties.proposalId),
+    runId: asString(properties.runId),
+    actionType: asString(properties.actionType),
+    targetId: asString(properties.targetId),
+    idempotencyKey: asString(properties.idempotencyKey),
+    createdAt: asString(properties.createdAt),
+  });
+};
+
+const receiptFromNode = (node: GraphNode): ExecutionReceipt => {
+  const properties = node.properties;
+  return ExecutionReceiptSchema.parse({
+    receiptId: nodeId(node),
+    authorizationId: asString(properties.authorizationId),
+    proposalId: asString(properties.proposalId),
+    runId: asString(properties.runId),
+    actionType: asString(properties.actionType),
+    targetId: asString(properties.targetId),
+    idempotencyKey: asString(properties.idempotencyKey),
+    status: asString(properties.status),
+    executedAt: asString(properties.executedAt),
+    details: json<Record<string, unknown>>(properties.detailsJson),
+  });
+};
 
 function nodeId(node: GraphNode): string {
   return asString(node.properties.id);
@@ -164,6 +241,41 @@ export class GraphRepository {
       await session.executeWrite((transaction) =>
         transaction.run(
           "CREATE CONSTRAINT receipt_id IF NOT EXISTS FOR (node:ExecutionReceipt) REQUIRE node.id IS UNIQUE",
+        ),
+      );
+      await session.executeWrite((transaction) =>
+        transaction.run(
+          "CREATE CONSTRAINT context_snapshot_id IF NOT EXISTS FOR (node:ContextSnapshot) REQUIRE node.id IS UNIQUE",
+        ),
+      );
+      await session.executeWrite((transaction) =>
+        transaction.run(
+          "CREATE CONSTRAINT action_id IF NOT EXISTS FOR (node:Action) REQUIRE node.id IS UNIQUE",
+        ),
+      );
+      await session.executeWrite((transaction) =>
+        transaction.run(
+          "CREATE CONSTRAINT outcome_id IF NOT EXISTS FOR (node:Outcome) REQUIRE node.id IS UNIQUE",
+        ),
+      );
+      await session.executeWrite((transaction) =>
+        transaction.run(
+          "CREATE CONSTRAINT source_id IF NOT EXISTS FOR (node:Source) REQUIRE node.id IS UNIQUE",
+        ),
+      );
+      await session.executeWrite((transaction) =>
+        transaction.run(
+          "CREATE CONSTRAINT verification_id IF NOT EXISTS FOR (node:Verification) REQUIRE node.id IS UNIQUE",
+        ),
+      );
+      await session.executeWrite((transaction) =>
+        transaction.run(
+          "CREATE CONSTRAINT authorization_id IF NOT EXISTS FOR (node:ActionAuthorization) REQUIRE node.id IS UNIQUE",
+        ),
+      );
+      await session.executeWrite((transaction) =>
+        transaction.run(
+          "CREATE CONSTRAINT execution_intent_id IF NOT EXISTS FOR (node:ExecutionIntent) REQUIRE node.id IS UNIQUE",
         ),
       );
     } finally {
@@ -449,9 +561,9 @@ export class GraphRepository {
         transaction.run(
           `UNWIND $evidence AS evidence
            MERGE (node:Evidence {id: evidence.id})
+           ON CREATE SET node.ingestedAt = $now
            SET node.contentHash = evidence.contentHash,
-               node.claimedApproval = evidence.claimedApproval,
-               node.ingestedAt = $now
+               node.claimedApproval = evidence.claimedApproval
            MERGE (source:Source {id: evidence.sourceId})
            SET source.name = evidence.sourceName,
                source.authority = evidence.authority
@@ -780,24 +892,28 @@ export class GraphRepository {
       await session.executeWrite((transaction) =>
         transaction.run(
           `MERGE (node:Evaluation {id: $evaluationId})
-           SET node.proposalId = $proposalId,
-               node.verdict = $verdict,
-               node.reasonCodes = $reasonCodes,
-               node.policyIds = $policyIds,
-               node.precedentIds = $precedentIds,
-               node.rejectedEvidenceIds = $rejectedEvidenceIds,
-               node.scenarioVersion = $scenarioVersion,
-               node.policyVersion = $policyVersion,
-               node.expiresAt = $expiresAt,
-               node.runId = $runId,
-               node.actionType = $actionType,
-               node.targetId = $targetId,
-               node.createdAt = $createdAt`,
+           ON CREATE SET node.proposalId = $proposalId,
+                         node.verdict = $verdict,
+                         node.reasonCodes = $reasonCodes,
+                         node.policyIds = $policyIds,
+                         node.precedentIds = $precedentIds,
+                         node.rejectedEvidenceIds = $rejectedEvidenceIds,
+                         node.scenarioVersion = $scenarioVersion,
+                         node.policyVersion = $policyVersion,
+                         node.expiresAt = $expiresAt,
+                         node.runId = $runId,
+                         node.actionType = $actionType,
+                         node.targetId = $targetId,
+                         node.evaluationJson = $evaluationJson,
+                         node.proposalJson = $proposalJson,
+                         node.createdAt = $createdAt`,
           {
             ...evaluation,
             runId: proposal.runId,
             actionType: proposal.actionType,
             targetId: proposal.targetId,
+            evaluationJson: JSON.stringify(evaluation),
+            proposalJson: JSON.stringify(proposal),
             createdAt: new Date().toISOString(),
           },
         ),
@@ -807,15 +923,210 @@ export class GraphRepository {
     }
   }
 
-  async recordReceipt(receipt: ExecutionReceipt): Promise<void> {
+  async findEvaluation(evaluationId: string): Promise<DecisionRecord | null> {
+    const session = this.driver.session({ database: this.database });
+    try {
+      const result = await session.executeRead((transaction) =>
+        transaction.run(
+          `MATCH (evaluation:Evaluation {id: $evaluationId})
+           RETURN evaluation.proposalJson AS proposalJson,
+                  evaluation.evaluationJson AS evaluationJson`,
+          { evaluationId },
+        ),
+      );
+      const record = result.records[0];
+      if (!record) {
+        return null;
+      }
+      return {
+        proposal: ActionProposalSchema.parse(
+          json<ActionProposal>(record.get("proposalJson")),
+        ),
+        evaluation: EvaluationSchema.parse(
+          json<Evaluation>(record.get("evaluationJson")),
+        ),
+      };
+    } finally {
+      await session.close();
+    }
+  }
+
+  async recordAuthorization(
+    authorization: ActionAuthorization,
+    proposal: ActionProposal,
+  ): Promise<void> {
+    const session = this.driver.session({ database: this.database });
+    const properties = {
+      ...authorization,
+      id: authorization.authorizationId,
+      proposalJson: JSON.stringify(proposal),
+    };
+    try {
+      await session.executeWrite((transaction) =>
+        transaction.run(
+          `MATCH (evaluation:Evaluation {id: $evaluationId})
+           MERGE (authorization:ActionAuthorization {id: $authorizationId})
+           ON CREATE SET authorization += $authorization
+           MERGE (evaluation)-[:AUTHORIZES {id: "authorizes-" + $authorizationId}]->(authorization)`,
+          {
+            evaluationId: authorization.evaluationId,
+            authorizationId: authorization.authorizationId,
+            authorization: properties,
+          },
+        ),
+      );
+    } finally {
+      await session.close();
+    }
+  }
+
+  async findAuthorizedAction(
+    authorizationId: string,
+  ): Promise<AuthorizedAction | null> {
+    const session = this.driver.session({ database: this.database });
+    try {
+      const result = await session.executeRead((transaction) =>
+        transaction.run(
+          `MATCH (evaluation:Evaluation)-[:AUTHORIZES]->(authorization:ActionAuthorization {id: $authorizationId})
+           RETURN authorization,
+                  evaluation.proposalJson AS proposalJson,
+                  evaluation.evaluationJson AS evaluationJson`,
+          { authorizationId },
+        ),
+      );
+      const record = result.records[0];
+      if (!record) {
+        return null;
+      }
+      return {
+        authorization: authorizationFromNode(
+          record.get("authorization") as GraphNode,
+        ),
+        proposal: ActionProposalSchema.parse(
+          json<ActionProposal>(record.get("proposalJson")),
+        ),
+        evaluation: EvaluationSchema.parse(
+          json<Evaluation>(record.get("evaluationJson")),
+        ),
+      };
+    } finally {
+      await session.close();
+    }
+  }
+
+  async claimExecutionIntent(
+    intent: ExecutionIntent,
+    consumedAt: string,
+  ): Promise<ExecutionIntent | null> {
+    const session = this.driver.session({ database: this.database });
+    const properties = { ...intent, id: intent.intentId };
+    try {
+      const result = await session.executeWrite((transaction) =>
+        transaction.run(
+          `MATCH (authorization:ActionAuthorization {id: $authorizationId})
+           WHERE authorization.consumedAt IS NULL
+           SET authorization.consumedAt = $consumedAt
+           WITH authorization
+           MERGE (intent:ExecutionIntent {id: $intentId})
+           ON CREATE SET intent += $intent
+           MERGE (authorization)-[:EXECUTION_INTENDED {id: "execution-intended-" + $intentId}]->(intent)
+           RETURN intent`,
+          {
+            authorizationId: intent.authorizationId,
+            intentId: intent.intentId,
+            intent: properties,
+            consumedAt,
+          },
+        ),
+      );
+      const record = result.records[0];
+      return record ? intentFromNode(record.get("intent") as GraphNode) : null;
+    } finally {
+      await session.close();
+    }
+  }
+
+  async findExecutionIntent(
+    authorizationId: string,
+  ): Promise<ExecutionIntentRecord | null> {
+    const session = this.driver.session({ database: this.database });
+    try {
+      const result = await session.executeRead((transaction) =>
+        transaction.run(
+          `MATCH (:ActionAuthorization {id: $authorizationId})-[:EXECUTION_INTENDED]->(intent:ExecutionIntent)
+           OPTIONAL MATCH (intent)-[:RESULTED_IN]->(receipt:ExecutionReceipt)
+           RETURN intent, receipt`,
+          { authorizationId },
+        ),
+      );
+      const record = result.records[0];
+      if (!record) {
+        return null;
+      }
+      const receipt = record.get("receipt") as GraphNode | null;
+      return {
+        intent: intentFromNode(record.get("intent") as GraphNode),
+        receipt: receipt ? receiptFromNode(receipt) : null,
+      };
+    } finally {
+      await session.close();
+    }
+  }
+
+  async recordReceipt(
+    intentId: string,
+    receipt: ExecutionReceipt,
+  ): Promise<void> {
     const session = this.driver.session({ database: this.database });
     try {
       await session.executeWrite((transaction) =>
         transaction.run(
-          `MERGE (node:ExecutionReceipt {id: $receiptId})
-           SET node += $receipt`,
-          { receiptId: receipt.receiptId, receipt },
+          `MERGE (receipt:ExecutionReceipt {id: $receiptId})
+           SET receipt.authorizationId = $authorizationId,
+               receipt.proposalId = $proposalId,
+               receipt.runId = $runId,
+               receipt.actionType = $actionType,
+               receipt.targetId = $targetId,
+               receipt.idempotencyKey = $idempotencyKey,
+               receipt.status = $status,
+               receipt.executedAt = $executedAt,
+               receipt.detailsJson = $detailsJson
+           WITH receipt
+           MATCH (intent:ExecutionIntent {id: $intentId})
+           MERGE (intent)-[:RESULTED_IN {id: "resulted-in-" + $intentId}]->(receipt)`,
+          {
+            intentId,
+            receiptId: receipt.receiptId,
+            authorizationId: receipt.authorizationId,
+            proposalId: receipt.proposalId,
+            runId: receipt.runId,
+            actionType: receipt.actionType,
+            targetId: receipt.targetId,
+            idempotencyKey: receipt.idempotencyKey,
+            status: receipt.status,
+            executedAt: receipt.executedAt,
+            detailsJson: JSON.stringify(receipt.details),
+          },
         ),
+      );
+    } finally {
+      await session.close();
+    }
+  }
+
+  async receiptsForProposal(proposalId: string): Promise<ExecutionReceipt[]> {
+    const session = this.driver.session({ database: this.database });
+    try {
+      const result = await session.executeRead((transaction) =>
+        transaction.run(
+          `MATCH (receipt:ExecutionReceipt {proposalId: $proposalId})
+           RETURN receipt
+           ORDER BY receipt.executedAt`,
+          { proposalId },
+        ),
+      );
+      return result.records.map((record) =>
+        receiptFromNode(record.get("receipt") as GraphNode),
       );
     } finally {
       await session.close();

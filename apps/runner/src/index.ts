@@ -18,15 +18,23 @@ import {
   type ActionAuthorization,
   type ActionProposal,
   type Evaluation,
+  type ExecutionReceipt,
   type RunOrigin,
 } from "@precedent/contracts";
 import { z } from "zod";
 
 config({ path: fileURLToPath(new URL("../../../.env", import.meta.url)) });
 
+const requiredEnvironment = (name: string): string => {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`${name} must be configured.`);
+  }
+  return value;
+};
+
 const brokerUrl = process.env.BROKER_URL ?? "http://127.0.0.1:3001";
-const brokerToken =
-  process.env.BROKER_RUNNER_TOKEN ?? "precedent-local-runner-token";
+const brokerToken = requiredEnvironment("BROKER_RUNNER_TOKEN");
 const consoleUrl = process.env.CONSOLE_URL ?? "http://localhost:3000";
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -43,9 +51,6 @@ const runRequestSchema = z.object({
   origin: z
     .enum(["LIVE_AGENT", "HISTORICAL_REPLAY", "COUNTERFACTUAL"])
     .default("LIVE_AGENT"),
-});
-const messageRequestSchema = z.object({
-  message: z.string().min(1),
 });
 const demoRequestSchema = z.object({
   runId: z.string().min(1).optional(),
@@ -86,7 +91,7 @@ type BrokerEvaluation = {
 };
 
 type BrokerExecution = {
-  receipt: Record<string, unknown>;
+  receipt: ExecutionReceipt;
   snapshot: Record<string, unknown> | null;
 };
 
@@ -444,7 +449,7 @@ const createTools = (run: RunRecord) =>
               },
             );
             return resultText({
-              executed: true,
+              executed: execution.receipt.status === "SUCCEEDED",
               evaluation: pending.evaluation,
               ...execution,
             });
@@ -522,6 +527,7 @@ const createRun = async (
   const runId = randomUUID();
   const queue = new UserInputQueue();
   queue.enqueue(prompt);
+  queue.close();
   const placeholder = {} as RunRecord;
   const tools = createTools(placeholder);
   const agent = query({
@@ -644,20 +650,6 @@ server.post("/api/demo/reset", async (request) => {
       body: JSON.stringify({ runId, origin: input.origin }),
     }),
   };
-});
-server.post("/api/runs/:runId/messages", async (request) => {
-  const run = runs.get((request.params as { runId: string }).runId);
-  if (!run) {
-    throw Object.assign(new Error("Run not found."), { statusCode: 404 });
-  }
-  if (run.status !== "running") {
-    throw Object.assign(
-      new Error("Only a running session can receive a message."),
-      { statusCode: 409 },
-    );
-  }
-  run.queue.enqueue(messageRequestSchema.parse(request.body).message);
-  return publicRun(run);
 });
 server.post("/api/runs/:runId/cancel", async (request) => {
   const run = runs.get((request.params as { runId: string }).runId);

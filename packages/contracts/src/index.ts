@@ -100,6 +100,18 @@ export const ActionAuthorizationSchema = z.object({
 });
 export type ActionAuthorization = z.infer<typeof ActionAuthorizationSchema>;
 
+export const ExecutionIntentSchema = z.object({
+  intentId: z.string().min(1),
+  authorizationId: z.string().min(1),
+  proposalId: z.string().min(1),
+  runId: z.string().min(1),
+  actionType: ActionTypeSchema,
+  targetId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type ExecutionIntent = z.infer<typeof ExecutionIntentSchema>;
+
 export const ExecutionStatusSchema = z.enum(["SUCCEEDED", "FAILED", "UNKNOWN"]);
 export type ExecutionStatus = z.infer<typeof ExecutionStatusSchema>;
 

@@ -9,8 +9,11 @@ import { RangeController } from "./index.js";
 
 config({ path: fileURLToPath(new URL("../../../.env", import.meta.url)) });
 
-const brokerToken =
-  process.env.RANGE_BROKER_TOKEN ?? "precedent-local-range-token";
+const brokerToken = process.env.RANGE_BROKER_TOKEN;
+if (!brokerToken) {
+  throw new Error("RANGE_BROKER_TOKEN must be configured.");
+}
+
 const range = new RangeController();
 const counterfactualRange = new RangeController();
 const server = Fastify({ logger: true });
@@ -89,7 +92,7 @@ server.post(
         statusCode: 400,
       });
     }
-    return range.mutate(proposal);
+    return range.mutate(proposal, idempotencyKey);
   },
 );
 
@@ -100,8 +103,18 @@ server.post("/admin/reset", { preHandler: authenticateBroker }, async () =>
 server.post(
   "/counterfactual/admin/mutate",
   { preHandler: authenticateBroker },
-  async (request) =>
-    counterfactualRange.counterfactualMutate(bodyProposal(request.body)),
+  async (request) => {
+    const idempotencyKey = request.headers["idempotency-key"];
+    if (typeof idempotencyKey !== "string" || idempotencyKey.length === 0) {
+      throw Object.assign(new Error("idempotency-key is required."), {
+        statusCode: 400,
+      });
+    }
+    return counterfactualRange.counterfactualMutate(
+      bodyProposal(request.body),
+      idempotencyKey,
+    );
+  },
 );
 server.post(
   "/counterfactual/admin/reset",
