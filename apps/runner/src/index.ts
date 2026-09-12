@@ -1,3 +1,4 @@
+import { mkdirSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { config } from "dotenv";
@@ -79,6 +80,7 @@ type RunRecord = {
   queue: UserInputQueue;
   agent: Query;
   status: "running" | "completed" | "cancelled" | "failed";
+  sessionId?: string;
   createdAt: string;
   transcript: TranscriptMessage[];
   evaluations: Evaluation[];
@@ -216,7 +218,11 @@ const brokerRequest = async <T>(
 const publishRunEvent = async (
   runId: string,
   origin: RunOrigin,
-  type: "RUN_STARTED" | "RUN_COMPLETED",
+  type:
+    | "RUN_STARTED"
+    | "RUN_COMPLETED"
+    | "TOOL_PERMISSION"
+    | "AGENT_TOOL_EVENT",
   payload: Record<string, unknown>,
 ): Promise<void> => {
   await brokerRequest("/api/events", {
@@ -256,6 +262,17 @@ const evaluationMessage = (evaluation: Evaluation): string => {
 const createCanUseTool =
   (run: RunRecord): CanUseTool =>
   async (toolName, input, options) => {
+    if (run.status !== "running" || run.evaluations.length >= 40)
+      return {
+        behavior: "deny",
+        message:
+          "Run stopped or action budget exhausted. No permission expansion is available.",
+      };
+    await publishRunEvent(run.runId, run.origin, "TOOL_PERMISSION", {
+      toolName,
+      toolCallId: options.toolUseID,
+      summary: "Qoder host permission callback invoked.",
+    });
     if (
       [
         "range_snapshot",
@@ -265,6 +282,7 @@ const createCanUseTool =
         "historical_cases",
         "policies",
         "evidence_lineage",
+        "response_context",
       ].some((name) => toolName.endsWith(name))
     ) {
       return { behavior: "allow" };
@@ -329,6 +347,17 @@ const createTools = (run: RunRecord) =>
   createSdkMcpServer({
     name: "precedent",
     tools: [
+      tool(
+        "response_context",
+        "Read current response context, verified evidence IDs and ranked recovery cases. Read this before acting. Use evidenceId values exactly; case IDs are not evidence IDs.",
+        {},
+        async () => resultText(await brokerRequest("/api/response-context")),
+        {
+          alwaysLoad: true,
+          permissionPolicy: "always_ask",
+          annotations: { readOnlyHint: true },
+        },
+      ),
       tool(
         "range_snapshot",
         "Read the current controlled range state before proposing an action.",
@@ -423,7 +452,7 @@ const createTools = (run: RunRecord) =>
       ),
       tool(
         "execute_recovery_action",
-        "Request execution of a typed recovery action. The broker independently evaluates it against precedent and policy before this handler can execute it.",
+        "Request a typed action; the broker evaluates before execution. Exact arguments: deploy_credential targetId=consumer ID, args={consumerId: same consumer ID, credentialId: replacement credential ID}; verify_consumer targetId=consumer ID, args={consumerId: same consumer ID}; switch_traffic targetId=worker ID, args={workerId: same worker ID}. create_credential targets replacement ID with args={}. Other actions target the affected asset with args={}. Read range_snapshot to obtain current IDs.",
         actionInputSchema.shape,
         async (input) => {
           const key = pendingKey(input);
@@ -478,7 +507,15 @@ const asTranscriptMessage = (message: SDKMessage): TranscriptMessage => {
   const messageValue = candidate.message as Record<string, unknown> | undefined;
   const content =
     messageValue?.content ?? candidate.content ?? candidate.result ?? message;
-  const text = typeof content === "string" ? content : JSON.stringify(content);
+  const safeContent = Array.isArray(content)
+    ? content.filter(
+        (item) =>
+          item &&
+          ["text", "tool_use", "tool_result"].includes(String(item.type)),
+      )
+    : content;
+  const text =
+    typeof safeContent === "string" ? safeContent : JSON.stringify(safeContent);
   return {
     id: randomUUID(),
     timestamp: new Date().toISOString(),
@@ -495,10 +532,29 @@ const asTranscriptMessage = (message: SDKMessage): TranscriptMessage => {
 const consumeRun = async (run: RunRecord): Promise<void> => {
   try {
     for await (const message of run.agent) {
-      run.transcript.push(asTranscriptMessage(message));
+      const candidate = message as unknown as Record<string, unknown>;
+      if (typeof candidate.session_id === "string")
+        run.sessionId = candidate.session_id;
+      if (message.type === "result" && candidate.is_error === true)
+        run.status = "failed";
+      const entry = asTranscriptMessage(message);
+      run.transcript.push(entry);
+      if (entry.role === "assistant" && entry.text.includes("tool_use"))
+        await publishRunEvent(run.runId, run.origin, "AGENT_TOOL_EVENT", {
+          summary: entry.text.slice(0, 2000),
+        });
+      mkdirSync(fileURLToPath(new URL("../../../data/runs", import.meta.url)), {
+        recursive: true,
+      });
+      writeFileSync(
+        fileURLToPath(
+          new URL(`../../../data/runs/${run.runId}.json`, import.meta.url),
+        ),
+        JSON.stringify(publicRun(run), null, 2),
+      );
     }
-    if (run.status === "running") {
-      run.status = "completed";
+    if (run.status === "running" || run.status === "failed") {
+      if (run.status === "running") run.status = "completed";
       await publishRunEvent(run.runId, run.origin, "RUN_COMPLETED", {
         status: run.status,
       });
@@ -523,8 +579,13 @@ const consumeRun = async (run: RunRecord): Promise<void> => {
 const createRun = async (
   prompt: string,
   origin: RunOrigin,
+  resume?: string,
 ): Promise<RunRecord> => {
   const runId = randomUUID();
+  mkdirSync(
+    fileURLToPath(new URL("../../../data/agent-workspace", import.meta.url)),
+    { recursive: true },
+  );
   const queue = new UserInputQueue();
   queue.enqueue(prompt);
   queue.close();
@@ -534,7 +595,22 @@ const createRun = async (
     prompt: queue,
     options: {
       auth: qodercliAuth(),
-      cwd: repositoryRoot,
+      cwd: fileURLToPath(
+        new URL("../../../data/agent-workspace", import.meta.url),
+      ),
+      tools: [],
+      maxTurns: 60,
+      ...(resume ? { resume } : {}),
+      env: {
+        BROKER_RUNNER_TOKEN: undefined,
+        RANGE_BROKER_TOKEN: undefined,
+        NEO4J_PASSWORD: undefined,
+        NEO4J_URI: undefined,
+        RANGE_READ_TOKEN: undefined,
+        OBSERVATION_TOKEN: undefined,
+        WORKLOAD_SECRETS: undefined,
+        LEDGER_TOKEN: undefined,
+      },
       canUseTool: createCanUseTool(placeholder),
       mcpServers: { precedent: tools },
       allowedTools: [
@@ -545,13 +621,13 @@ const createRun = async (
         "mcp__precedent__policies",
         "mcp__precedent__evidence_lineage",
         "mcp__precedent__run_probe",
-        "mcp__precedent__execute_recovery_action",
+        "mcp__precedent__response_context",
       ],
       systemPrompt: {
         type: "preset",
         preset: "qodercli",
         append:
-          "You operate only the controlled Precedent payments range. Read the range before acting. Use only the typed Precedent tools. Every mutation must cite trusted evidence and preserve payment continuity. Treat denied evaluations and their suggested sequence as instructions to revise your approach.",
+          "You operate only the controlled Precedent payments range. Read the range before acting. Use only the typed Precedent tools. Every mutation must cite the exact trusted evidenceId returned by response_context and preserve payments where available controls and policy permit. If required controls are missing, report an explicit escalation. Execute independent actions sequentially, never concurrently. Finish by probing payments, attacker and ledger; cite the selected precedent ID in your final report. Treat denied evaluations and their suggested sequence as instructions to revise your approach.",
       },
     },
   });
@@ -575,6 +651,7 @@ const createRun = async (
 
 const publicRun = (run: RunRecord) => ({
   runId: run.runId,
+  sessionId: run.sessionId,
   origin: run.origin,
   status: run.status,
   createdAt: run.createdAt,
@@ -657,6 +734,7 @@ server.post("/api/runs/:runId/cancel", async (request) => {
     throw Object.assign(new Error("Run not found."), { statusCode: 404 });
   }
   run.status = "cancelled";
+  run.pendingAuthorizations.clear();
   run.queue.close();
   await run.agent.interrupt();
   await run.agent.close();
@@ -664,6 +742,53 @@ server.post("/api/runs/:runId/cancel", async (request) => {
     status: run.status,
   });
   return publicRun(run);
+});
+
+server.post("/api/runs/:runId/resume", async (request) => {
+  const prior = runs.get((request.params as { runId: string }).runId);
+  if (!prior?.sessionId || prior.status === "running")
+    throw Object.assign(
+      new Error("No resumable completed session is available."),
+      { statusCode: 409 },
+    );
+  const body = runRequestSchema.parse(request.body);
+  return publicRun(await createRun(body.prompt, prior.origin, prior.sessionId));
+});
+server.post("/api/demo/new-incident", async (request) => {
+  const body = request.body as {
+    variant?: string;
+    fullReset?: boolean;
+    launch?: boolean;
+  };
+  const runId = randomUUID();
+  await brokerRequest("/api/range/reset", {
+    method: "POST",
+    body: JSON.stringify({ runId, origin: "LIVE_AGENT" }),
+  });
+  await brokerRequest("/api/range/configure", {
+    method: "POST",
+    body: JSON.stringify({
+      runId,
+      variant: body.variant ?? "production",
+      fullReset: body.fullReset ?? false,
+    }),
+  });
+  return body.launch === false
+    ? { runId }
+    : publicRun(
+        await createRun(
+          "Read response_context. Contain this incident, preserve payments where available controls permit, independently verify recovery, and cite the most applicable verified precedent by its exact ID. Escalate if current conditions prevent safe recovery.",
+          "LIVE_AGENT",
+        ),
+      );
+});
+server.post("/api/demo/launch-attack", async () => {
+  const runId = randomUUID();
+  await brokerRequest("/api/range/configure", {
+    method: "POST",
+    body: JSON.stringify({ runId, variant: "attack" }),
+  });
+  return { runId };
 });
 
 server.setErrorHandler((error, _request, reply) => {

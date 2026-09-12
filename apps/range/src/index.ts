@@ -149,6 +149,7 @@ export class RangeController {
       ...structuredClone(snapshot),
       transactionIds: new Set(),
     };
+    this.persist();
     return this.snapshot();
   }
 
@@ -310,6 +311,17 @@ export class RangeController {
     }
   }
 
+  mutationResult(
+    proposal: ActionProposal,
+    key: string,
+  ): MutationOutcome | null {
+    const saved = this.mutations.get(key);
+    if (!saved) return null;
+    if (saved.fingerprint !== canonicalize(proposal))
+      throw new Error("Mutation fingerprint mismatch.");
+    return saved.outcome;
+  }
+
   private withIdempotency(
     proposal: ActionProposal,
     idempotencyKey: string,
@@ -433,6 +445,10 @@ export class RangeController {
 
 export type RangeClient = {
   snapshot(): Promise<RangeSnapshot>;
+  mutationResult(
+    proposal: ActionProposal,
+    key: string,
+  ): Promise<MutationOutcome | null>;
   mutate(
     proposal: ActionProposal,
     idempotencyKey: string,
@@ -487,6 +503,11 @@ export function createRangeClient(
 
   return {
     snapshot: () => request<RangeSnapshot>("/snapshot"),
+    mutationResult: (proposal, key) =>
+      request<MutationOutcome | null>("/admin/mutation-result", {
+        method: "POST",
+        body: JSON.stringify({ proposal, key }),
+      }),
     configure: (variant) =>
       request<RangeSnapshot>("/admin/configure", {
         method: "POST",

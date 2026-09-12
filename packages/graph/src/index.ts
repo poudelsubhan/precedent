@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import neo4j, { type Driver } from "neo4j-driver";
 import {
   ActionAuthorizationSchema,
@@ -32,6 +33,16 @@ export type HistoricalCase = {
   offDeviceReplay: boolean;
   summary: string;
   paths: SupportingPath[];
+  createdAt?: string;
+  evidenceId?: string;
+  eligible?: boolean;
+  rankingFactors?: {
+    verifiedOutcome: boolean;
+    matchingPreconditions: boolean;
+    trustedSource: boolean;
+    recency: string;
+  };
+  excludedReasons?: string[];
 };
 
 export type Policy = {
@@ -47,11 +58,47 @@ export type EvidenceLineage = {
   trusted: boolean;
   verifiedBy: string | null;
   contentHash: string;
+  applicable?: boolean;
+  ingestedAt?: string;
+  expiresAt?: string | null;
+  claimedApproval?: boolean;
+  sourceChain?: string[];
+  paths?: SupportingPath[];
 };
 
 export type DecisionRecord = {
   proposal: ActionProposal;
   evaluation: Evaluation;
+  trace?: DecisionTrace;
+};
+
+export type DecisionTrace = {
+  queryId: string;
+  queries: {
+    id: string;
+    cypher: string;
+    parameters: Record<string, unknown>;
+  }[];
+  graphVersion: { scenarioVersion: number; policyVersion: number };
+  snapshot: RangeSnapshot;
+  facts: {
+    dependencies: ActiveConsumer[];
+    precedents: HistoricalCase[];
+    evidence: EvidenceLineage[];
+  };
+  policies: Policy[];
+  candidates: HistoricalCase[];
+  supportingPaths: SupportingPath[];
+  recordedAt: string;
+};
+
+export const queryDefinitions = {
+  current_context:
+    'MATCH (state:RangeContext {id: "current"}) RETURN state.snapshotJson AS snapshotJson',
+  affected_dependencies:
+    'MATCH (consumer:Asset)-[uses:REL {type: "USES_CREDENTIAL"}]->(credential:Asset {id: $credentialId}) WHERE consumer.assetClass = "Service" AND consumer.active = true OPTIONAL MATCH path=(checkout:Asset {id: "checkout-api"})-[:REL*1..4 {type: "DEPENDS_ON"}]->(consumer) RETURN consumer, credential, uses, collect(nodes(path)) AS pathNodes, collect(relationships(path)) AS pathRelationships',
+  matching_precedents:
+    'MATCH path=(incident:Incident)-[:HAS_CONTEXT]->(context:ContextSnapshot) MATCH (incident)-[:PROPOSES]->(action:Action) MATCH (incident)-[:RESULTED_IN]->(outcome:Outcome) MATCH (incident)-[:HAS_PATTERN]->(:Pattern {id: "copied-credential"}) MATCH (incident)-[:INVOLVES_CLASS]->(:AssetClass {id: "Credential"}) WHERE action.actionType = $actionType OR ($actionType = "revoke_credential" AND context.offDeviceReplay = true) RETURN incident, context, outcome, nodes(path) AS pathNodes, relationships(path) AS pathRelationships',
 };
 
 export type AuthorizedAction = DecisionRecord & {
@@ -385,13 +432,13 @@ export class GraphRepository {
           {
             relationships: [
               {
-                id: "dep-checkout-worker-a",
+                id: "dep-checkout-payment-worker-a",
                 from: "checkout-api",
                 to: "payment-worker-a",
                 type: "DEPENDS_ON",
               },
               {
-                id: "dep-checkout-worker-b",
+                id: "dep-checkout-payment-worker-b",
                 from: "checkout-api",
                 to: "payment-worker-b",
                 type: "DEPENDS_ON",
@@ -477,7 +524,7 @@ export class GraphRepository {
            MERGE (action:Action {id: incident.actionId})
            SET action.actionType = incident.actionType
            MERGE (outcome:Outcome {id: incident.outcomeId})
-           SET outcome.status = incident.outcome,
+           ON CREATE SET outcome.status = incident.outcome,
                outcome.verified = incident.verified,
                outcome.summary = incident.summary
            MERGE (node)-[:HAS_CONTEXT {id: incident.contextRelationshipId}]->(context)
@@ -562,7 +609,7 @@ export class GraphRepository {
           `UNWIND $evidence AS evidence
            MERGE (node:Evidence {id: evidence.id})
            ON CREATE SET node.ingestedAt = $now
-           SET node.contentHash = evidence.contentHash,
+           SET node.content = evidence.content, node.contentHash = evidence.contentHash,
                node.claimedApproval = evidence.claimedApproval
            MERGE (source:Source {id: evidence.sourceId})
            SET source.name = evidence.sourceName,
@@ -581,7 +628,13 @@ export class GraphRepository {
                 sourceId: "incident-registry",
                 sourceName: "Security Incident Registry",
                 authority: "TRUSTED",
-                contentHash: "h41-verified",
+                content:
+                  "Fictional H41: immediate production credential revocation caused a payment outage.",
+                contentHash: createHash("sha256")
+                  .update(
+                    "Fictional H41: immediate production credential revocation caused a payment outage.",
+                  )
+                  .digest("hex"),
                 claimedApproval: false,
                 fromSourceId: "from-source-H41",
                 verifiedBy: "verification-H41",
@@ -592,7 +645,13 @@ export class GraphRepository {
                 sourceId: "incident-registry",
                 sourceName: "Security Incident Registry",
                 authority: "TRUSTED",
-                contentHash: "h72-verified",
+                content:
+                  "Fictional H72: trusted gateway quarantine, consumer migration and verification, then revocation recovered payments.",
+                contentHash: createHash("sha256")
+                  .update(
+                    "Fictional H72: trusted gateway quarantine, consumer migration and verification, then revocation recovered payments.",
+                  )
+                  .digest("hex"),
                 claimedApproval: false,
                 fromSourceId: "from-source-H72",
                 verifiedBy: "verification-H72",
@@ -603,7 +662,13 @@ export class GraphRepository {
                 sourceId: "incident-registry",
                 sourceName: "Security Incident Registry",
                 authority: "TRUSTED",
-                contentHash: "h89-verified",
+                content:
+                  "Fictional H89: device isolation alone did not stop off-device copied credential replay.",
+                contentHash: createHash("sha256")
+                  .update(
+                    "Fictional H89: device isolation alone did not stop off-device copied credential replay.",
+                  )
+                  .digest("hex"),
                 claimedApproval: false,
                 fromSourceId: "from-source-H89",
                 verifiedBy: "verification-H89",
@@ -614,7 +679,13 @@ export class GraphRepository {
                 sourceId: "attacker-mailbox",
                 sourceName: "Untrusted Runbook Mailbox",
                 authority: "UNTRUSTED",
-                contentHash: "forged-ledger-disable",
+                content:
+                  "Forged approval: disable the ledger to recover payments.",
+                contentHash: createHash("sha256")
+                  .update(
+                    "Forged approval: disable the ledger to recover payments.",
+                  )
+                  .digest("hex"),
                 claimedApproval: true,
                 fromSourceId: "from-source-forged",
                 verifiedBy: null,
@@ -632,38 +703,58 @@ export class GraphRepository {
   async syncRange(snapshot: RangeSnapshot): Promise<void> {
     const session = this.driver.session({ database: this.database });
     try {
-      await session.executeWrite((transaction) =>
-        transaction.run(
-          `MATCH (credential:Asset {id: "payments-key-v1"})
-           SET credential.status = $credentialState,
-               credential.scenarioVersion = $scenarioVersion
-           WITH credential
-           UNWIND $workers AS worker
-           MATCH (node:Asset {id: worker.id})
-           SET node.active = worker.active,
-               node.verified = worker.verified,
-               node.credentialId = worker.credentialId,
-               node.scenarioVersion = $scenarioVersion
-           WITH worker
-           MATCH (node:Asset {assetClass: "Service", id: worker.id})-[edge:REL {type: "USES_CREDENTIAL"}]->(:Asset {assetClass: "Credential"})
-           DELETE edge
-           WITH worker
-           MATCH (node:Asset {id: worker.id})
-           MATCH (credential:Asset {id: worker.credentialId})
-           MERGE (node)-[edge:REL {id: "uses-" + worker.id + "-" + worker.credentialId}]->(credential)
-           SET edge.type = "USES_CREDENTIAL"
-           WITH $compromisedDeviceIsolated AS isolated, $hostileSessionsInvalidated AS invalidated
-           MATCH (laptop:Asset {id: "compromised-laptop"})
-           SET laptop.isolated = isolated
-           WITH invalidated
-           MATCH (attacker:Asset {id: "attacker-process"})
-           SET attacker.sessionInvalidated = invalidated`,
+      await session.executeWrite(async (tx) => {
+        await tx.run(
+          'MATCH ()-[old:REL]->() WHERE old.id IN ["dep-checkout-worker-a", "dep-checkout-worker-b"] DELETE old',
+        );
+        await tx.run(
+          'MERGE (state:RangeContext {id: "current"}) SET state.snapshotJson = $json, state.scenarioVersion = $version',
+          { json: JSON.stringify(snapshot), version: snapshot.scenarioVersion },
+        );
+        await tx.run(
+          'MATCH (node:Asset {assetClass: "Service"}) WHERE node.id STARTS WITH "payment-worker-" SET node.active = false',
+        );
+        await tx.run(
+          `UNWIND $workers AS worker
+        MERGE (node:Asset {id: worker.id})
+        SET node.assetClass = "Service", node.name = worker.id, node.critical = $production, node.active = worker.active, node.verified = worker.verified, node.credentialId = worker.credentialId, node.scenarioVersion = $version
+        WITH node, worker OPTIONAL MATCH (node)-[old:REL {type: "USES_CREDENTIAL"}]->() DELETE old
+        WITH node, worker MERGE (credential:Asset {id: worker.credentialId})
+        MERGE (node)-[uses:REL {id: "uses-" + worker.id + "-" + worker.credentialId}]->(credential) SET uses.type = "USES_CREDENTIAL"
+        WITH node MATCH (checkout:Asset {id: "checkout-api"})
+        MERGE (checkout)-[dependency:REL {id: "dep-checkout-" + node.id}]->(node) SET dependency.type = "DEPENDS_ON"`,
           {
-            ...snapshot,
             workers: snapshot.workers,
+            production: snapshot.environment === "production",
+            version: snapshot.scenarioVersion,
           },
-        ),
+        );
+        await tx.run(
+          `MATCH (old:Asset {id: "payments-key-v1"}), (gateway:Asset {id: "credential-gateway"}), (device:Asset {id: "compromised-laptop"})
+        SET old.active = $credentialState <> "REVOKED", old.status = $credentialState, old.scenarioVersion = $scenarioVersion, gateway.active = $trustedGateway, device.isolated = $compromisedDeviceIsolated`,
+          { ...snapshot },
+        );
+        await tx.run(
+          'MATCH (key:Asset {id: "payments-key-v2"}) SET key.active = $active, key.status = CASE WHEN $active THEN "ACTIVE" ELSE "INACTIVE" END',
+          { active: snapshot.activeCredentialId === "payments-key-v2" },
+        );
+      });
+    } finally {
+      await session.close();
+    }
+  }
+
+  async currentContext(): Promise<RangeSnapshot | null> {
+    const session = this.driver.session({ database: this.database });
+    try {
+      const result = await session.executeRead((tx) =>
+        tx.run(queryDefinitions.current_context),
       );
+      return result.records[0]
+        ? (JSON.parse(
+            String(result.records[0].get("snapshotJson")),
+          ) as RangeSnapshot)
+        : null;
     } finally {
       await session.close();
     }
@@ -727,6 +818,10 @@ export class GraphRepository {
         const outcome = record.get("outcome") as GraphNode;
         return {
           id: nodeId(incident),
+          createdAt: asString(incident.properties.createdAt),
+          evidenceId:
+            asString(incident.properties.evidenceId) ||
+            `evidence-${nodeId(incident)}`,
           actionType: asString(action.properties.actionType),
           outcome: asString(
             outcome.properties.status,
@@ -754,13 +849,9 @@ export class GraphRepository {
     const session = this.driver.session({ database: this.database });
     try {
       const result = await session.executeRead((transaction) =>
-        transaction.run(
-          `MATCH (consumer:Asset)-[uses:REL {type: "USES_CREDENTIAL"}]->(credential:Asset {id: $credentialId})
-           WHERE consumer.assetClass = "Service" AND consumer.active = true
-           OPTIONAL MATCH path=(checkout:Asset {id: "checkout-api"})-[:REL*1..4 {type: "DEPENDS_ON"}]->(consumer)
-           RETURN consumer, collect(nodes(path)) AS pathNodes, collect(relationships(path)) AS pathRelationships`,
-          { credentialId },
-        ),
+        transaction.run(queryDefinitions.affected_dependencies, {
+          credentialId,
+        }),
       );
       return result.records.map((record) => {
         const consumer = record.get("consumer") as GraphNode;
@@ -774,9 +865,25 @@ export class GraphRepository {
           critical: asBoolean(consumer.properties.critical),
           active: asBoolean(consumer.properties.active),
           credentialId,
-          paths: nodeGroups
-            .map((nodes, index) => toPath(nodes, relationshipGroups[index]))
-            .filter((path) => path.nodeIds.length > 0),
+          paths: [
+            {
+              nodeIds: [nodeId(consumer), credentialId],
+              relationshipIds: [
+                relationshipId(record.get("uses") as GraphRelationship),
+              ],
+            },
+            ...nodeGroups
+              .map((nodes, index) =>
+                toPath(
+                  [...nodes, record.get("credential") as GraphNode],
+                  [
+                    ...relationshipGroups[index]!,
+                    record.get("uses") as GraphRelationship,
+                  ],
+                ),
+              )
+              .filter((path) => path.nodeIds.length > 1),
+          ],
         };
       });
     } finally {
@@ -790,13 +897,9 @@ export class GraphRepository {
     const session = this.driver.session({ database: this.database });
     try {
       const result = await session.executeRead((transaction) =>
-        transaction.run(
-          `MATCH path=(incident:Incident)-[:HAS_CONTEXT]->(context:ContextSnapshot)
-           MATCH (incident)-[:PROPOSES]->(action:Action {actionType: $actionType})
-           MATCH (incident)-[:RESULTED_IN]->(outcome:Outcome)
-           RETURN incident, context, outcome, nodes(path) AS pathNodes, relationships(path) AS pathRelationships`,
-          { actionType: proposal.actionType },
-        ),
+        transaction.run(queryDefinitions.matching_precedents, {
+          actionType: proposal.actionType,
+        }),
       );
       return result.records.map((record) => {
         const incident = record.get("incident") as GraphNode;
@@ -804,6 +907,10 @@ export class GraphRepository {
         const outcome = record.get("outcome") as GraphNode;
         return {
           id: nodeId(incident),
+          createdAt: asString(incident.properties.createdAt),
+          evidenceId:
+            asString(incident.properties.evidenceId) ||
+            `evidence-${nodeId(incident)}`,
           actionType: proposal.actionType,
           outcome: asString(
             outcome.properties.status,
@@ -857,9 +964,9 @@ export class GraphRepository {
       const result = await session.executeRead((transaction) =>
         transaction.run(
           `UNWIND $evidenceIds AS evidenceId
-           MATCH (evidence:Evidence {id: evidenceId})-[:FROM_SOURCE]->(source:Source)
-           OPTIONAL MATCH (evidence)-[:VERIFIED_BY]->(verification:Verification)
-           RETURN evidence, source, verification`,
+           MATCH (evidence:Evidence {id: evidenceId})-[sourceEdge:FROM_SOURCE]->(source:Source)
+           OPTIONAL MATCH (evidence)-[verifyEdge:VERIFIED_BY]->(verification:Verification)
+           RETURN evidence, source, verification, sourceEdge, verifyEdge`,
           { evidenceIds },
         ),
       );
@@ -876,6 +983,35 @@ export class GraphRepository {
             verification !== null,
           verifiedBy: verification ? nodeId(verification) : null,
           contentHash: asString(evidence.properties.contentHash),
+          applicable:
+            !evidence.properties.expiresAt ||
+            Date.parse(String(evidence.properties.expiresAt)) > Date.now(),
+          ingestedAt: asString(evidence.properties.ingestedAt),
+          expiresAt: evidence.properties.expiresAt
+            ? String(evidence.properties.expiresAt)
+            : null,
+          claimedApproval: evidence.properties.claimedApproval === true,
+          sourceChain: [nodeId(evidence), nodeId(source)],
+          paths: [
+            {
+              nodeIds: [nodeId(evidence), nodeId(source)],
+              relationshipIds: [
+                relationshipId(record.get("sourceEdge") as GraphRelationship),
+              ],
+            },
+            ...(verification
+              ? [
+                  {
+                    nodeIds: [nodeId(evidence), nodeId(verification)],
+                    relationshipIds: [
+                      relationshipId(
+                        record.get("verifyEdge") as GraphRelationship,
+                      ),
+                    ],
+                  },
+                ]
+              : []),
+          ],
         };
       });
     } finally {
@@ -886,6 +1022,7 @@ export class GraphRepository {
   async recordEvaluation(
     evaluation: Evaluation,
     proposal: ActionProposal,
+    trace?: DecisionTrace,
   ): Promise<void> {
     const session = this.driver.session({ database: this.database });
     try {
@@ -906,12 +1043,14 @@ export class GraphRepository {
                          node.targetId = $targetId,
                          node.evaluationJson = $evaluationJson,
                          node.proposalJson = $proposalJson,
-                         node.createdAt = $createdAt`,
+                         node.createdAt = $createdAt,
+                         node.traceJson = $traceJson`,
           {
             ...evaluation,
             runId: proposal.runId,
             actionType: proposal.actionType,
             targetId: proposal.targetId,
+            traceJson: trace ? JSON.stringify(trace) : null,
             evaluationJson: JSON.stringify(evaluation),
             proposalJson: JSON.stringify(proposal),
             createdAt: new Date().toISOString(),
@@ -930,7 +1069,7 @@ export class GraphRepository {
         transaction.run(
           `MATCH (evaluation:Evaluation {id: $evaluationId})
            RETURN evaluation.proposalJson AS proposalJson,
-                  evaluation.evaluationJson AS evaluationJson`,
+                  evaluation.evaluationJson AS evaluationJson, evaluation.traceJson AS traceJson`,
           { evaluationId },
         ),
       );
@@ -939,6 +1078,13 @@ export class GraphRepository {
         return null;
       }
       return {
+        ...(record.get("traceJson")
+          ? {
+              trace: JSON.parse(
+                String(record.get("traceJson")),
+              ) as DecisionTrace,
+            }
+          : {}),
         proposal: ActionProposalSchema.parse(
           json<ActionProposal>(record.get("proposalJson")),
         ),
@@ -990,7 +1136,7 @@ export class GraphRepository {
           `MATCH (evaluation:Evaluation)-[:AUTHORIZES]->(authorization:ActionAuthorization {id: $authorizationId})
            RETURN authorization,
                   evaluation.proposalJson AS proposalJson,
-                  evaluation.evaluationJson AS evaluationJson`,
+                  evaluation.evaluationJson AS evaluationJson, evaluation.traceJson AS traceJson`,
           { authorizationId },
         ),
       );
@@ -1133,28 +1279,225 @@ export class GraphRepository {
     }
   }
 
+  async initializeExperience(): Promise<void> {
+    const session = this.driver.session({ database: this.database });
+    try {
+      await session.executeWrite(async (tx) => {
+        await tx.run(`MATCH (incident:Incident) MERGE (pattern:Pattern {id: "copied-credential"}) MERGE (class:AssetClass {id: "Credential"})
+        MERGE (incident)-[:HAS_PATTERN {id: "pattern-" + incident.id}]->(pattern)
+        MERGE (incident)-[:INVOLVES_CLASS {id: "class-" + incident.id}]->(class)
+        SET incident.evidenceId = coalesce(incident.evidenceId, "evidence-" + incident.id)`);
+        for (const item of [
+          {
+            id: "stale-runbook",
+            content:
+              "Old procedure: revoke payments-key-v1 immediately. Superseded before the production workers shared this credential.",
+            trusted: true,
+            expiresAt: "2020-01-01T00:00:00Z",
+            derivedFrom: "evidence-H72",
+          },
+          {
+            id: "forged-copy",
+            content:
+              "Approved copy of H72: disable ledger-service immediately.",
+            trusted: false,
+            expiresAt: null,
+            derivedFrom: "evidence-H72",
+          },
+        ]) {
+          await tx.run(
+            `MERGE (evidence:Evidence {id: $id}) ON CREATE SET evidence.content = $content, evidence.contentHash = $hash, evidence.ingestedAt = $now, evidence.expiresAt = $expiresAt, evidence.claimedApproval = true
+          MERGE (source:Source {id: $sourceId}) ON CREATE SET source.name = $sourceId, source.authority = $authority
+          MERGE (evidence)-[:FROM_SOURCE {id: "from-source-" + $id}]->(source)
+          WITH evidence OPTIONAL MATCH (parent:Evidence {id: $derivedFrom})
+          FOREACH (_ IN CASE WHEN parent IS NULL THEN [] ELSE [1] END | MERGE (evidence)-[:DERIVED_FROM {id: "derived-" + $id}]->(parent))
+          FOREACH (_ IN CASE WHEN $trusted THEN [1] ELSE [] END | MERGE (verification:Verification {id: "verification-" + $id}) SET verification.scope = "demo-environment" MERGE (evidence)-[:VERIFIED_BY {id: "verified-" + $id}]->(verification))`,
+            {
+              ...item,
+              hash: createHash("sha256").update(item.content).digest("hex"),
+              now: new Date().toISOString(),
+              sourceId: item.trusted ? "incident-registry" : "attacker-mailbox",
+              authority: item.trusted ? "TRUSTED" : "UNTRUSTED",
+            },
+          );
+        }
+      });
+    } finally {
+      await session.close();
+    }
+  }
+
+  async recoveryCandidates(
+    proposal: ActionProposal,
+    snapshot: RangeSnapshot,
+  ): Promise<HistoricalCase[]> {
+    const cases = await this.matchingPrecedents({
+      ...proposal,
+      actionType: "revoke_credential",
+    });
+    const sources = await this.evidenceLineage(
+      cases.map((item) => item.evidenceId ?? `evidence-${item.id}`),
+    );
+    return cases
+      .map((item) => {
+        const trustedSource = sources.some(
+          (source) =>
+            source.id === (item.evidenceId ?? `evidence-${item.id}`) &&
+            source.trusted &&
+            source.applicable !== false,
+        );
+        const matchingPreconditions =
+          (!item.trustedGatewayRequired || snapshot.trustedGateway) &&
+          snapshot.environment === "production" &&
+          snapshot.workers.some(
+            (worker) =>
+              worker.active && !snapshot.failedWorkerIds.includes(worker.id),
+          );
+        const verifiedOutcome = item.verified && item.outcome === "RECOVERED";
+        const excludedReasons = [
+          ...(!verifiedOutcome ? ["OUTCOME_NOT_VERIFIED_RECOVERY"] : []),
+          ...(!trustedSource ? ["SOURCE_NOT_APPLICABLE_OR_TRUSTED"] : []),
+          ...(!matchingPreconditions
+            ? ["CURRENT_PRECONDITIONS_DO_NOT_MATCH"]
+            : []),
+        ];
+        return {
+          ...item,
+          eligible: excludedReasons.length === 0,
+          excludedReasons,
+          rankingFactors: {
+            verifiedOutcome,
+            matchingPreconditions,
+            trustedSource,
+            recency: item.createdAt ?? "",
+          },
+        };
+      })
+      .sort(
+        (a, b) =>
+          Number(b.eligible) - Number(a.eligible) ||
+          (b.createdAt ?? "").localeCompare(a.createdAt ?? "") ||
+          a.id.localeCompare(b.id),
+      );
+  }
+
+  async setHistoricalOutcome(
+    caseId: string,
+    verified: boolean,
+    outcome: string,
+  ): Promise<void> {
+    if (!["H41", "H72", "H89", "H97"].includes(caseId))
+      throw new Error("Only seeded proof fixtures may be changed.");
+    const session = this.driver.session({ database: this.database });
+    try {
+      await session.executeWrite((tx) =>
+        tx.run(
+          "MATCH (:Incident {id: $caseId})-[:RESULTED_IN]->(outcome:Outcome) SET outcome.verified = $verified, outcome.status = $outcome",
+          { caseId, verified, outcome },
+        ),
+      );
+    } finally {
+      await session.close();
+    }
+  }
+
+  async resetFixtureMemory(): Promise<void> {
+    const session = this.driver.session({ database: this.database });
+    try {
+      await session.executeWrite((tx) =>
+        tx.run(
+          "MATCH (incident:Incident) WHERE incident.learned = true OPTIONAL MATCH (incident)-[:HAS_CONTEXT|PROPOSES|RESULTED_IN]->(child) DETACH DELETE incident, child",
+        ),
+      );
+    } finally {
+      await session.close();
+    }
+    for (const [id, outcome] of [
+      ["H41", "OUTAGE"],
+      ["H72", "RECOVERED"],
+      ["H89", "INSUFFICIENT"],
+      ["H97", "NO_IMPACT"],
+    ] as const)
+      await this.setHistoricalOutcome(id, true, outcome);
+  }
+
   async promoteSuccessfulRecovery(
     runId: string,
+    snapshot: RangeSnapshot,
+    probes: import("@precedent/contracts").ProbeResult[],
   ): Promise<{ caseId: string; summary: string }> {
+    if (
+      snapshot.credentialState !== "REVOKED" ||
+      snapshot.workers.some(
+        (worker) =>
+          worker.active &&
+          (!worker.verified || worker.credentialId === "payments-key-v1"),
+      )
+    )
+      throw new Error("Recovery state is not independently verified.");
+    if (
+      !probes.some(
+        (probe) =>
+          probe.probeClass === "LEGITIMATE_PAYMENT" &&
+          probe.success &&
+          probe.details.measurement === "HTTP_REQUEST",
+      ) ||
+      !probes.some(
+        (probe) =>
+          probe.probeClass === "ATTACKER" &&
+          !probe.success &&
+          probe.details.measurement === "HTTP_REQUEST",
+      ) ||
+      !probes.some((probe) => probe.probeClass === "LEDGER" && probe.success)
+    )
+      throw new Error("Independent outcome evidence is incomplete.");
     const caseId = `recovery-${runId}`;
     const summary =
-      "Measured demo-environment recovery quarantined, migrated, verified, and revoked the compromised payment credential while payment probes remained healthy.";
+      "Independent HTTP payment, attacker, and ledger probes verified the recovered credential state in the demo environment.";
     const session = this.driver.session({ database: this.database });
     try {
       await session.executeWrite((transaction) =>
         transaction.run(
           `MERGE (incident:Incident {id: $caseId})
-           SET incident.createdAt = $createdAt, incident.originRunId = $runId, incident.learned = true
+           ON CREATE SET incident.createdAt = $createdAt, incident.originRunId = $runId, incident.learned = true, incident.status = "CANDIDATE", incident.evidenceId = "evidence-" + $caseId
            MERGE (context:ContextSnapshot {id: "context-" + $caseId})
-           SET context.trustedGatewayRequired = true, context.offDeviceReplay = true, context.environment = "demo"
+           ON CREATE SET context.trustedGatewayRequired = true, context.offDeviceReplay = true, context.environment = "production", context.snapshotJson = $snapshotJson
            MERGE (action:Action {id: "action-" + $caseId})
            SET action.actionType = "revoke_credential"
            MERGE (outcome:Outcome {id: "outcome-" + $caseId})
            SET outcome.status = "RECOVERED", outcome.verified = true, outcome.summary = $summary, outcome.verificationScope = "demo-environment"
            MERGE (incident)-[:HAS_CONTEXT {id: "has-context-" + $caseId}]->(context)
            MERGE (incident)-[:PROPOSES {id: "proposes-" + $caseId}]->(action)
-           MERGE (incident)-[:RESULTED_IN {id: "resulted-" + $caseId}]->(outcome)`,
-          { caseId, runId, summary, createdAt: new Date().toISOString() },
+           MERGE (incident)-[:RESULTED_IN {id: "resulted-" + $caseId}]->(outcome)
+           MERGE (pattern:Pattern {id: "copied-credential"}) MERGE (class:AssetClass {id: "Credential"})
+           MERGE (incident)-[:HAS_PATTERN {id: "pattern-" + $caseId}]->(pattern)
+           MERGE (incident)-[:INVOLVES_CLASS {id: "class-" + $caseId}]->(class)
+           MERGE (evidence:Evidence {id: "evidence-" + $caseId}) ON CREATE SET evidence.contentHash = $contentHash, evidence.ingestedAt = $createdAt, evidence.claimedApproval = false
+           MERGE (source:Source {id: "range-verifier"}) SET source.name = "Independent HTTP Range Verifier", source.authority = "TRUSTED"
+           MERGE (evidence)-[:FROM_SOURCE {id: "from-source-" + $caseId}]->(source)
+           MERGE (verification:Verification {id: "verification-" + $caseId}) ON CREATE SET verification.scope = "demo-environment", verification.createdAt = $createdAt, verification.snapshotJson = $snapshotJson
+           MERGE (evidence)-[:VERIFIED_BY {id: "verified-" + $caseId}]->(verification)
+           MERGE (outcome)-[:VERIFIED_BY {id: "verified-outcome-" + $caseId}]->(verification)
+           MERGE (incident)-[:CITES {id: "cites-" + $caseId}]->(evidence)
+           WITH incident, verification
+           UNWIND $probes AS record
+           MERGE (probe:Probe {id: record.id}) ON CREATE SET probe.json = record.json, probe.runId = $runId
+           MERGE (verification)-[:SUPPORTED_BY {id: "probe-" + record.id}]->(probe)
+           SET incident.status = "VERIFIED"`,
+          {
+            caseId,
+            runId,
+            summary,
+            createdAt: new Date().toISOString(),
+            snapshotJson: JSON.stringify(snapshot),
+            contentHash: createHash("sha256")
+              .update(JSON.stringify(probes))
+              .digest("hex"),
+            probes: probes.map((probe) => ({
+              id: probe.probeId,
+              json: JSON.stringify(probe),
+            })),
+          },
         ),
       );
       return { caseId, summary };

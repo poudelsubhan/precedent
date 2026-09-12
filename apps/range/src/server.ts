@@ -128,6 +128,15 @@ server.post(
 );
 
 server.post(
+  "/admin/mutation-result",
+  { preHandler: authenticateBroker },
+  async (request) => {
+    const body = request.body as { proposal: unknown; key: string };
+    return range.mutationResult(bodyProposal(body), body.key);
+  },
+);
+
+server.post(
   "/admin/mutate",
   { preHandler: authenticateBroker },
   async (request) => {

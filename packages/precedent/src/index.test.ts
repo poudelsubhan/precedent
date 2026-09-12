@@ -4,6 +4,12 @@ import type { GraphRepository, HistoricalCase } from "@precedent/graph";
 import { PrecedentEvaluator } from "./index.js";
 
 const snapshot: RangeSnapshot = {
+  trustedGateway: true,
+  attackActive: true,
+  environment: "production",
+  trafficWorkerId: "payment-worker-a",
+  ledgerEnabled: true,
+  failedWorkerIds: [],
   scenarioVersion: 1,
   policyVersion: 1,
   compromisedDeviceIsolated: false,
@@ -53,7 +59,23 @@ const proposal = (
 
 function evaluator(precedents: HistoricalCase[] = []) {
   const graph = {
-    affectedDependencies: vi.fn(async () => []),
+    currentContext: vi.fn(async () => ({
+      ...snapshot,
+      observedAt: new Date().toISOString(),
+    })),
+    affectedDependencies: vi.fn(async (id: string) =>
+      id === "payments-key-v1"
+        ? snapshot.workers.map((worker) => ({
+            id: worker.id,
+            active: true,
+            critical: true,
+            paths: [],
+          }))
+        : [],
+    ),
+    recoveryCandidates: vi.fn(async () => [
+      { id: "H72", eligible: true, evidenceId: "evidence-H72" },
+    ]),
     matchingPrecedents: vi.fn(async () => precedents),
     applicablePolicies: vi.fn(async () => [
       {

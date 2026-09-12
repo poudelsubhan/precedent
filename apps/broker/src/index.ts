@@ -104,7 +104,9 @@ const receiptFor = (
 
 const isAmbiguousTransportFailure = (error: unknown): boolean =>
   error instanceof TypeError ||
-  (error as { name?: string }).name === "AbortError";
+  ["AbortError", "TimeoutError"].includes(
+    (error as { name?: string }).name ?? "",
+  );
 
 const runnerOnly = async (request: {
   headers: Record<string, string | string[] | undefined>;
@@ -173,21 +175,18 @@ const decisionTrace = async (
   proposal: ActionProposal,
   evaluation: Evaluation,
 ) => {
-  const [dependencies, precedents, policies, evidence] = await Promise.all([
-    graph.affectedDependencies(proposal.targetId),
-    graph.matchingPrecedents(proposal),
-    graph.applicablePolicies(),
-    graph.evidenceLineage(proposal.evidenceIds),
-  ]);
+  const stored = await graph.findEvaluation(evaluation.evaluationId);
+  if (stored?.trace) return stored.trace;
   return {
-    queryId: `decision-trace-${evaluation.evaluationId}`,
+    queryId: `legacy-${evaluation.evaluationId}`,
     graphVersion: {
       scenarioVersion: evaluation.scenarioVersion,
       policyVersion: evaluation.policyVersion,
     },
-    facts: { dependencies, precedents, evidence },
-    policies,
+    facts: { dependencies: [], precedents: [], evidence: [] },
+    policies: [],
     supportingPaths: evaluation.supportingPaths,
+    legacy: true,
   };
 };
 
@@ -210,7 +209,11 @@ const verifyAndPromoteRecovery = async (
   if (!payment.success || attacker.success || !ledger.success) {
     return;
   }
-  const promoted = await graph.promoteSuccessfulRecovery(runId);
+  const promoted = await graph.promoteSuccessfulRecovery(runId, snapshot, [
+    payment,
+    attacker,
+    ledger,
+  ]);
   promotedRunIds.add(runId);
   publish(runId, origin, "PRECEDENT_PROMOTED", {
     ...promoted,
@@ -449,7 +452,7 @@ server.post(
       throw Object.assign(new Error("runId is required."), { statusCode: 400 });
     }
     const proposal = historicalH41Proposal(body.runId);
-    const before = await range.resetCounterfactual();
+    const before = await range.cloneCounterfactual(await currentRange());
     publish(body.runId, "COUNTERFACTUAL", "ACTION_PROPOSED", {
       proposal,
       historicalCaseId: "H41",
@@ -475,7 +478,7 @@ server.post(
       });
     }
     return {
-      label: "Projected in model",
+      label: "Independent HTTP counterfactual from cloned live snapshot",
       before,
       proposal,
       outcome,
@@ -591,6 +594,31 @@ server.post("/api/execute", { preHandler: runnerOnly }, async (request) => {
       };
     }
 
+    if (intentRecord) {
+      const saved = await range.mutationResult(
+        authorizedAction.proposal,
+        intentRecord.intent.idempotencyKey,
+      );
+      if (!saved)
+        throw Object.assign(
+          new Error(
+            "Execution outcome remains unknown; automatic retry is held.",
+          ),
+          { statusCode: 409 },
+        );
+      const receipt = receiptFor(
+        intentRecord.intent,
+        "SUCCEEDED",
+        { ...saved.details, reconciled: true },
+        intentRecord.receipt?.receiptId,
+      );
+      await graph.recordReceipt(intentRecord.intent.intentId, receipt);
+      const reconciledSnapshot = await currentRange();
+      publish(receipt.runId, origin, "ACTION_EXECUTED", { receipt });
+      await verifyAndPromoteRecovery(receipt.runId, origin, reconciledSnapshot);
+      return { receipt, snapshot: reconciledSnapshot };
+    }
+
     const snapshot = await currentRange();
     if (
       snapshot.scenarioVersion !==
@@ -606,6 +634,17 @@ server.post("/api/execute", { preHandler: runnerOnly }, async (request) => {
     }
 
     if (!intentRecord) {
+      const currentEvaluation = await evaluator.evaluate(
+        authorizedAction.proposal,
+        snapshot,
+      );
+      if (currentEvaluation.verdict !== "ALLOW")
+        throw Object.assign(
+          new Error(
+            "Current policy or evidence no longer authorizes this action.",
+          ),
+          { statusCode: 409 },
+        );
       if (
         new Date(authorizedAction.authorization.expiresAt).getTime() <=
         Date.now()
@@ -743,6 +782,115 @@ server.post("/api/range/reset", { preHandler: runnerOnly }, async (request) => {
   });
 });
 
+server.get("/api/response-context", async () => {
+  const snapshot = await currentRange();
+  const candidates = await graph.recoveryCandidates(
+    historicalH41Proposal("context-read"),
+    snapshot,
+  );
+  const evidence = await graph.evidenceLineage([
+    "evidence-H41",
+    "evidence-H72",
+    "evidence-H89",
+    "stale-runbook",
+    "forged-copy",
+    ...candidates.map((item) => item.evidenceId ?? `evidence-${item.id}`),
+  ]);
+  return {
+    snapshot,
+    policies: await graph.applicablePolicies(),
+    candidates,
+    evidence,
+    staleRunbook: {
+      evidenceId: "stale-runbook",
+      status: "VERIFIED_BUT_EXPIRED",
+      text: "Old procedure recommends immediate revocation. It predates current shared payment workers and is not applicable authority.",
+    },
+    objective:
+      "Contain copied credential use, preserve legitimate payments when controls permit, verify payment/attacker/ledger outcomes. Cite an exact trusted and applicable evidence ID for every action.",
+  };
+});
+server.get("/api/metrics", async () => range.metrics());
+server.get("/api/events", async (request) => ({
+  events: eventBus.replay(
+    Number((request.query as { after?: string }).after ?? 0),
+  ),
+}));
+server.get("/api/runs/:runId/report", async (request) => {
+  const runId = (request.params as { runId: string }).runId;
+  const events = eventBus.replay().filter((event) => event.runId === runId);
+  const ids = [
+    ...new Set(
+      events
+        .map(
+          (event) =>
+            (event.payload.evaluation as Evaluation | undefined)?.evaluationId,
+        )
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ];
+  const decisions = await Promise.all(
+    ids.map(async (id) => {
+      const record = await graph.findEvaluation(id);
+      return record
+        ? {
+            ...record,
+            receipts: await graph.receiptsForProposal(
+              record.proposal.proposalId,
+            ),
+          }
+        : null;
+    }),
+  );
+  return {
+    runId,
+    exportedAt: new Date().toISOString(),
+    events,
+    decisions,
+    metrics: await range.metrics(),
+    learnedCases: events
+      .filter((event) => event.type === "PRECEDENT_PROMOTED")
+      .map((event) => event.payload.caseId),
+  };
+});
+server.post(
+  "/api/range/configure",
+  { preHandler: runnerOnly },
+  async (request) =>
+    runMutation(async () => {
+      const body = request.body as {
+        variant: string;
+        runId: string;
+        fullReset?: boolean;
+      };
+      if (body.fullReset) {
+        await graph.resetFixtureMemory();
+        promotedRunIds.clear();
+      }
+      const snapshot = await range.configure(body.variant);
+      await graph.syncRange(snapshot);
+      publish(body.runId, "LIVE_AGENT", "RANGE_RESET", {
+        snapshot,
+        memoryPreserved: !body.fullReset,
+        variant: body.variant,
+      });
+      return snapshot;
+    }),
+);
+server.post(
+  "/api/proofs/history",
+  { preHandler: runnerOnly },
+  async (request) => {
+    const body = request.body as {
+      caseId: string;
+      verified: boolean;
+      outcome: string;
+    };
+    await graph.setHistoricalOutcome(body.caseId, body.verified, body.outcome);
+    return { updated: true };
+  },
+);
+
 server.setErrorHandler((error, _request, reply) => {
   const message =
     error instanceof Error ? error.message : "Broker request failed.";
@@ -754,5 +902,6 @@ server.setErrorHandler((error, _request, reply) => {
 await graph.verifyConnectivity();
 await graph.initialize();
 await graph.seed();
+await graph.initializeExperience();
 const port = Number(process.env.BROKER_PORT ?? 3001);
 await server.listen({ host: "127.0.0.1", port });

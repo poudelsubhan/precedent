@@ -58,6 +58,8 @@ export type Evaluation = z.infer<typeof EvaluationSchema>;
 
 export const EventTypeSchema = z.enum([
   "RUN_STARTED",
+  "TOOL_PERMISSION",
+  "AGENT_TOOL_EVENT",
   "ACTION_PROPOSED",
   "EVALUATION_CREATED",
   "ACTION_DENIED",

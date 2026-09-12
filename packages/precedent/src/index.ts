@@ -3,11 +3,13 @@ import type {
   ActionProposal,
   Evaluation,
   RangeSnapshot,
-  SupportingPath,
 } from "@precedent/contracts";
-import { GraphRepository, type HistoricalCase } from "@precedent/graph";
-
-const authorizationLifetimeMs = 5 * 60 * 1_000;
+import {
+  GraphRepository,
+  queryDefinitions,
+  type DecisionTrace,
+  type HistoricalCase,
+} from "@precedent/graph";
 
 export class PrecedentEvaluator {
   constructor(private readonly graph: GraphRepository) {}
@@ -16,345 +18,285 @@ export class PrecedentEvaluator {
     proposal: ActionProposal,
     snapshot: RangeSnapshot,
   ): Promise<Evaluation> {
-    const [dependencies, precedents, policies, lineage] = await Promise.all([
-      this.graph.affectedDependencies(proposal.targetId),
-      this.graph.matchingPrecedents(proposal),
-      this.graph.applicablePolicies(),
-      this.graph.evidenceLineage(proposal.evidenceIds),
-    ]);
-
-    const rejectedEvidenceIds = [
-      ...proposal.evidenceIds.filter(
-        (id) => !lineage.some((item) => item.id === id),
-      ),
-      ...lineage.filter((item) => !item.trusted).map((item) => item.id),
-    ];
-    const policyIds = policies.map((policy) => policy.id);
-    const currentPaths = dependencies.flatMap((dependency) => dependency.paths);
-    const casePaths = precedents.flatMap((precedent) => precedent.paths);
-
-    const evaluation = this.decide({
-      proposal,
-      snapshot,
-      precedents,
-      policyIds,
-      rejectedEvidenceIds,
-      supportingPaths: [...currentPaths, ...casePaths],
-    });
-
-    await this.graph.recordEvaluation(evaluation, proposal);
-    return evaluation;
-  }
-
-  private decide(input: {
-    proposal: ActionProposal;
-    snapshot: RangeSnapshot;
-    precedents: HistoricalCase[];
-    policyIds: string[];
-    rejectedEvidenceIds: string[];
-    supportingPaths: SupportingPath[];
-  }): Evaluation {
-    const {
-      proposal,
-      snapshot,
-      precedents,
-      policyIds,
-      rejectedEvidenceIds,
-      supportingPaths,
-    } = input;
-    const base = {
+    const base: Evaluation = {
       evaluationId: randomUUID(),
       proposalId: proposal.proposalId,
-      policyIds,
-      precedentIds: precedents.map((precedent) => precedent.id),
-      rejectedEvidenceIds,
-      supportingPaths,
+      verdict: "ESCALATE",
+      reasonCodes: [],
+      policyIds: [],
+      precedentIds: [],
+      rejectedEvidenceIds: [],
+      supportingPaths: [],
+      suggestedSteps: [],
       scenarioVersion: snapshot.scenarioVersion,
       policyVersion: snapshot.policyVersion,
-      expiresAt: new Date(Date.now() + authorizationLifetimeMs).toISOString(),
+      expiresAt: new Date(Date.now() + 300000).toISOString(),
     };
-
-    if (rejectedEvidenceIds.length > 0) {
-      return {
-        ...base,
-        verdict: "DENY",
-        reasonCodes: ["UNTRUSTED_OR_MISSING_EVIDENCE"],
-        suggestedSteps: [],
+    let facts;
+    try {
+      const [
+        context,
+        dependencies,
+        precedents,
+        policies,
+        evidence,
+        candidates,
+      ] = await Promise.all([
+        this.graph.currentContext(),
+        this.graph.affectedDependencies(proposal.targetId),
+        this.graph.matchingPrecedents(proposal),
+        this.graph.applicablePolicies(),
+        this.graph.evidenceLineage(proposal.evidenceIds),
+        this.graph.recoveryCandidates(proposal, snapshot),
+      ]);
+      facts = {
+        context,
+        dependencies,
+        precedents,
+        policies,
+        evidence,
+        candidates,
       };
+    } catch {
+      return { ...base, reasonCodes: ["GRAPH_UNAVAILABLE_ACTION_HELD"] };
     }
-
-    if (proposal.actionType === "disable_service") {
-      return {
-        ...base,
-        verdict: "DENY",
-        reasonCodes: ["CRITICAL_SERVICE_PROTECTED"],
-        suggestedSteps: [],
-      };
-    }
-
-    if (proposal.actionType === "revoke_credential") {
-      const activeOldKeyConsumers = snapshot.workers.filter(
-        (worker) => worker.active && worker.credentialId === proposal.targetId,
-      );
-      if (activeOldKeyConsumers.length > 0) {
-        return {
-          ...base,
-          verdict: "REVISE",
-          reasonCodes: [
-            "ACTIVE_CRITICAL_CONSUMERS",
-            "CONTINUITY_POLICY_REQUIRES_MIGRATION",
-          ],
-          suggestedSteps: this.recoverySequence(proposal),
-        };
-      }
-      return this.allow(base);
-    }
-
-    if (
-      proposal.actionType === "isolate_device" &&
-      !snapshot.compromisedDeviceIsolated
-    ) {
-      const offDeviceReplay = precedents.some(
-        (precedent) =>
-          precedent.id === "H89" &&
-          precedent.verified &&
-          precedent.offDeviceReplay &&
-          precedent.outcome === "INSUFFICIENT",
-      );
-      if (offDeviceReplay) {
-        return {
-          ...base,
-          verdict: "REVISE",
-          reasonCodes: [
-            "OFF_DEVICE_CREDENTIAL_REPLAY",
-            "DEVICE_ISOLATION_INSUFFICIENT",
-          ],
-          suggestedSteps: [
-            this.action(
-              proposal.runId,
-              "quarantine_credential",
-              "payments-key-v1",
-              {},
-              "Restrict the compromised credential at the trusted gateway.",
-            ),
-            this.action(
-              proposal.runId,
-              "invalidate_session",
-              "hostile-session",
-              {},
-              "Invalidate known hostile sessions.",
-            ),
-            proposal,
-          ],
-        };
-      }
-    }
-
-    if (proposal.actionType === "quarantine_credential") {
-      if (snapshot.credentialState === "ACTIVE") {
-        return this.allow(base);
-      }
-      return this.deny(base, "CREDENTIAL_STATE_CHANGED");
-    }
-
-    if (proposal.actionType === "create_credential") {
-      if (snapshot.activeCredentialId === "payments-key-v1") {
-        return this.allow(base);
-      }
-      return this.deny(base, "REPLACEMENT_CREDENTIAL_ALREADY_EXISTS");
-    }
-
-    if (proposal.actionType === "deploy_credential") {
-      const consumerId = this.stringArgument(proposal, "consumerId");
-      const credentialId = this.stringArgument(proposal, "credentialId");
-      const consumer = snapshot.workers.find(
-        (worker) => worker.id === consumerId,
-      );
-      if (
-        consumer &&
-        credentialId === "payments-key-v2" &&
-        snapshot.activeCredentialId === "payments-key-v2"
-      ) {
-        return this.allow(base);
-      }
-      return this.escalate(
-        base,
-        "REPLACEMENT_CREDENTIAL_OR_CONSUMER_UNAVAILABLE",
-      );
-    }
-
-    if (proposal.actionType === "verify_consumer") {
-      const consumerId = this.stringArgument(proposal, "consumerId");
-      const consumer = snapshot.workers.find(
-        (worker) => worker.id === consumerId,
-      );
-      if (consumer?.credentialId === "payments-key-v2") {
-        return this.allow(base);
-      }
-      return this.escalate(base, "CONSUMER_NOT_MIGRATED");
-    }
-
-    if (proposal.actionType === "switch_traffic") {
-      const workerId = this.stringArgument(proposal, "workerId");
-      const consumer = snapshot.workers.find(
-        (worker) => worker.id === workerId,
-      );
-      if (consumer?.verified && consumer.credentialId === "payments-key-v2") {
-        return this.allow(base);
-      }
-      return this.escalate(base, "REPLACEMENT_CONSUMER_NOT_VERIFIED");
-    }
-
-    if (proposal.actionType === "invalidate_session") {
-      if (!snapshot.hostileSessionsInvalidated) {
-        return this.allow(base);
-      }
-      return this.deny(base, "SESSIONS_ALREADY_INVALIDATED");
-    }
-
-    if (proposal.actionType === "isolate_device") {
-      if (!snapshot.compromisedDeviceIsolated) {
-        return this.allow(base);
-      }
-      return this.deny(base, "DEVICE_ALREADY_ISOLATED");
-    }
-
-    return this.escalate(base, "NO_AUTHORIZED_RECOVERY_PATH");
-  }
-
-  private allow(
-    base: Omit<Evaluation, "verdict" | "reasonCodes" | "suggestedSteps">,
-  ): Evaluation {
-    return {
-      ...base,
-      verdict: "ALLOW",
-      reasonCodes: ["CURRENT_PRECONDITIONS_VERIFIED"],
-      suggestedSteps: [],
-    };
-  }
-
-  private deny(
-    base: Omit<Evaluation, "verdict" | "reasonCodes" | "suggestedSteps">,
-    reasonCode: string,
-  ): Evaluation {
-    return {
-      ...base,
-      verdict: "DENY",
-      reasonCodes: [reasonCode],
-      suggestedSteps: [],
-    };
-  }
-
-  private escalate(
-    base: Omit<Evaluation, "verdict" | "reasonCodes" | "suggestedSteps">,
-    reasonCode: string,
-  ): Evaluation {
-    return {
-      ...base,
-      verdict: "ESCALATE",
-      reasonCodes: [reasonCode],
-      suggestedSteps: [],
-    };
-  }
-
-  private recoverySequence(proposal: ActionProposal): ActionProposal[] {
-    return [
-      this.action(
-        proposal.runId,
-        "quarantine_credential",
-        "payments-key-v1",
-        {},
-        "Restrict copied credential use while preserving authenticated payment workloads.",
-      ),
-      this.action(
-        proposal.runId,
-        "invalidate_session",
-        "hostile-session",
-        {},
-        "Invalidate known hostile sessions.",
-      ),
-      this.action(
-        proposal.runId,
-        "isolate_device",
-        "compromised-laptop",
-        {},
-        "Contain the originating device after off-device replay is addressed.",
-      ),
-      this.action(
-        proposal.runId,
-        "create_credential",
-        "payments-key-v2",
-        {},
-        "Provision a replacement payment credential.",
-      ),
-      this.action(
-        proposal.runId,
-        "deploy_credential",
-        "payment-worker-b",
-        { consumerId: "payment-worker-b", credentialId: "payments-key-v2" },
-        "Deploy the replacement credential to the standby worker.",
-      ),
-      this.action(
-        proposal.runId,
-        "verify_consumer",
-        "payment-worker-b",
-        { consumerId: "payment-worker-b" },
-        "Verify payment processing through the replacement worker.",
-      ),
-      this.action(
-        proposal.runId,
-        "switch_traffic",
-        "payment-worker-b",
-        { workerId: "payment-worker-b" },
-        "Route traffic to the verified replacement worker.",
-      ),
-      this.action(
-        proposal.runId,
-        "deploy_credential",
-        "payment-worker-a",
-        { consumerId: "payment-worker-a", credentialId: "payments-key-v2" },
-        "Migrate the remaining payment worker.",
-      ),
-      this.action(
-        proposal.runId,
-        "verify_consumer",
-        "payment-worker-a",
-        { consumerId: "payment-worker-a" },
-        "Verify the remaining migrated consumer.",
-      ),
-      this.action(
-        proposal.runId,
-        "revoke_credential",
-        "payments-key-v1",
-        {},
-        "Revoke the old credential after every active consumer has migrated.",
-      ),
+    const {
+      context,
+      dependencies,
+      precedents,
+      policies,
+      evidence,
+      candidates,
+    } = facts;
+    const selected = candidates.find((item) => item.eligible);
+    base.policyIds = policies.map((item) => item.id);
+    base.precedentIds = [
+      ...new Set([
+        ...precedents.map((item) => item.id),
+        ...(selected ? [selected.id] : []),
+      ]),
     ];
-  }
-
-  private action(
-    runId: string,
-    actionType: ActionProposal["actionType"],
-    targetId: string,
-    args: Record<string, unknown>,
-    rationaleSummary: string,
-  ): ActionProposal {
-    return {
-      proposalId: randomUUID(),
-      runId,
-      actionType,
-      targetId,
-      args,
-      evidenceIds: ["evidence-H72"],
-      rationaleSummary,
+    base.rejectedEvidenceIds = proposal.evidenceIds.filter(
+      (id) =>
+        !evidence.some(
+          (item) => item.id === id && item.trusted && item.applicable !== false,
+        ),
+    );
+    base.supportingPaths = [
+      ...dependencies.flatMap((item) => item.paths),
+      ...precedents.flatMap((item) => item.paths),
+      ...evidence.flatMap((item) => item.paths ?? []),
+    ];
+    const decide = (
+      verdict: Evaluation["verdict"],
+      reasons: string[],
+      suggestedSteps: ActionProposal[] = [],
+    ) => Object.assign(base, { verdict, reasonCodes: reasons, suggestedSteps });
+    const allow = () => decide("ALLOW", ["CURRENT_PRECONDITIONS_VERIFIED"]);
+    const held = (reason: string) => decide("ESCALATE", [reason]);
+    const active = snapshot.workers.filter((worker) => worker.active);
+    const consumerId = proposal.args.consumerId;
+    const consumer = active.find((worker) => worker.id === consumerId);
+    const targetForAction: Partial<
+      Record<ActionProposal["actionType"], string>
+    > = {
+      quarantine_credential: "payments-key-v1",
+      revoke_credential: "payments-key-v1",
+      create_credential: "payments-key-v2",
+      isolate_device: "compromised-laptop",
+      invalidate_session: "hostile-session",
+      disable_service: "ledger-service",
     };
+    if (proposal.evidenceIds.length === 0 || base.rejectedEvidenceIds.length) {
+      decide("DENY", [
+        evidence.some((item) => item.applicable === false)
+          ? "STALE_OR_INAPPLICABLE_EVIDENCE"
+          : "UNTRUSTED_OR_MISSING_EVIDENCE",
+      ]);
+    } else if (
+      !context ||
+      context.scenarioVersion !== snapshot.scenarioVersion ||
+      context.policyVersion !== snapshot.policyVersion ||
+      !Number.isFinite(Date.parse(context.observedAt ?? "")) ||
+      Date.now() - Date.parse(context.observedAt ?? "") > 30000 ||
+      policies.length === 0
+    ) {
+      held("CURRENT_GRAPH_CONTEXT_MISSING_STALE_OR_CONFLICTING");
+    } else if (
+      targetForAction[proposal.actionType] &&
+      targetForAction[proposal.actionType] !== proposal.targetId
+    ) {
+      decide("DENY", ["ACTION_TARGET_MISMATCH"]);
+    } else if (proposal.actionType === "disable_service") {
+      decide("DENY", ["CRITICAL_SERVICE_PROTECTED"]);
+    } else if (proposal.actionType === "revoke_credential") {
+      const rangeConsumers = active.filter(
+        (worker) => worker.credentialId === proposal.targetId,
+      );
+      const graphIds = dependencies
+        .map((item) => item.id)
+        .sort()
+        .join(",");
+      const rangeIds = rangeConsumers
+        .map((item) => item.id)
+        .sort()
+        .join(",");
+      if (graphIds !== rangeIds) held("DEPENDENCY_GRAPH_CONFLICTS_WITH_RANGE");
+      else if (dependencies.length) {
+        if (!snapshot.trustedGateway)
+          held("NO_TRUSTED_GATEWAY_EMERGENCY_POLICY_REQUIRED");
+        else if (!selected) held("NO_ELIGIBLE_VERIFIED_RECOVERY_PRECEDENT");
+        else {
+          const steps = this.recoverySequence(proposal, snapshot, selected);
+          if (!steps.length) held("NO_HEALTHY_STANDBY_FOR_CONTINUOUS_RECOVERY");
+          else
+            decide(
+              "REVISE",
+              [
+                "ACTIVE_CRITICAL_CONSUMERS",
+                "CONTINUITY_POLICY_REQUIRES_MIGRATION",
+              ],
+              steps,
+            );
+        }
+      } else if (active.some((worker) => !worker.verified))
+        held("MIGRATED_CONSUMER_NOT_VERIFIED");
+      else allow();
+    } else if (proposal.actionType === "isolate_device") {
+      if (snapshot.compromisedDeviceIsolated)
+        decide("DENY", ["DEVICE_ALREADY_ISOLATED"]);
+      else if (snapshot.attackActive && snapshot.credentialState === "ACTIVE") {
+        if (!snapshot.trustedGateway || !selected)
+          held("NO_AUTHORIZED_OFF_DEVICE_CONTAINMENT_PATH");
+        else
+          decide(
+            "REVISE",
+            ["OFF_DEVICE_CREDENTIAL_REPLAY", "DEVICE_ISOLATION_INSUFFICIENT"],
+            this.recoverySequence(proposal, snapshot, selected).slice(0, 3),
+          );
+      } else allow();
+    } else if (proposal.actionType === "quarantine_credential") {
+      if (!snapshot.trustedGateway) held("TRUSTED_GATEWAY_UNAVAILABLE");
+      else if (snapshot.credentialState !== "ACTIVE")
+        decide("DENY", ["CREDENTIAL_STATE_CHANGED"]);
+      else allow();
+    } else if (proposal.actionType === "invalidate_session") {
+      if (snapshot.hostileSessionsInvalidated)
+        decide("DENY", ["SESSIONS_ALREADY_INVALIDATED"]);
+      else allow();
+    } else if (proposal.actionType === "create_credential") {
+      if (snapshot.activeCredentialId === "payments-key-v2")
+        decide("DENY", ["REPLACEMENT_CREDENTIAL_ALREADY_EXISTS"]);
+      else allow();
+    } else if (proposal.actionType === "deploy_credential") {
+      if (
+        !consumer ||
+        consumer.id !== proposal.targetId ||
+        proposal.args.credentialId !== "payments-key-v2" ||
+        snapshot.activeCredentialId !== "payments-key-v2"
+      )
+        held("REPLACEMENT_CREDENTIAL_OR_CONSUMER_UNAVAILABLE");
+      else if (snapshot.failedWorkerIds.includes(consumer.id))
+        held("CONSUMER_UNHEALTHY");
+      else allow();
+    } else if (proposal.actionType === "verify_consumer") {
+      if (
+        !consumer ||
+        consumer.id !== proposal.targetId ||
+        consumer.credentialId !== "payments-key-v2" ||
+        snapshot.failedWorkerIds.includes(consumer.id)
+      )
+        held("CONSUMER_NOT_MIGRATED_OR_UNHEALTHY");
+      else allow();
+    } else if (proposal.actionType === "switch_traffic") {
+      const worker = active.find((item) => item.id === proposal.args.workerId);
+      if (
+        !worker ||
+        worker.id !== proposal.targetId ||
+        !worker.verified ||
+        worker.credentialId !== "payments-key-v2" ||
+        snapshot.failedWorkerIds.includes(worker.id)
+      )
+        held("REPLACEMENT_CONSUMER_NOT_VERIFIED");
+      else allow();
+    } else held("NO_AUTHORIZED_RECOVERY_PATH");
+    const trace: DecisionTrace = {
+      queryId: `decision-trace-${base.evaluationId}`,
+      queries: Object.entries(queryDefinitions).map(([id, cypher]) => ({
+        id,
+        cypher,
+        parameters: {
+          credentialId: proposal.targetId,
+          actionType: proposal.actionType,
+        },
+      })),
+      graphVersion: {
+        scenarioVersion: snapshot.scenarioVersion,
+        policyVersion: snapshot.policyVersion,
+      },
+      snapshot,
+      facts: { dependencies, precedents, evidence },
+      policies,
+      candidates,
+      supportingPaths: base.supportingPaths,
+      recordedAt: new Date().toISOString(),
+    };
+    await this.graph.recordEvaluation(base, proposal, trace);
+    return base;
   }
 
-  private stringArgument(
+  private recoverySequence(
     proposal: ActionProposal,
-    name: string,
-  ): string | null {
-    const argument = proposal.args[name];
-    return typeof argument === "string" ? argument : null;
+    snapshot: RangeSnapshot,
+    precedent: HistoricalCase,
+  ): ActionProposal[] {
+    const active = snapshot.workers.filter((worker) => worker.active);
+    const standby = active.find(
+      (worker) =>
+        worker.id !== snapshot.trafficWorkerId &&
+        !snapshot.failedWorkerIds.includes(worker.id),
+    );
+    if (!standby) return [];
+    const steps: ActionProposal[] = [];
+    const add = (
+      actionType: ActionProposal["actionType"],
+      targetId: string,
+      args: Record<string, unknown> = {},
+    ) =>
+      steps.push({
+        proposalId: randomUUID(),
+        runId: proposal.runId,
+        actionType,
+        targetId,
+        args,
+        evidenceIds: [precedent.evidenceId ?? `evidence-${precedent.id}`],
+        rationaleSummary: `Apply verified ${precedent.id} recovery after checking current ${targetId} preconditions.`,
+      });
+    if (snapshot.credentialState === "ACTIVE")
+      add("quarantine_credential", "payments-key-v1");
+    if (!snapshot.hostileSessionsInvalidated)
+      add("invalidate_session", "hostile-session");
+    if (!snapshot.compromisedDeviceIsolated)
+      add("isolate_device", "compromised-laptop");
+    if (snapshot.activeCredentialId !== "payments-key-v2")
+      add("create_credential", "payments-key-v2");
+    for (const worker of [
+      standby,
+      ...active.filter((item) => item.id !== standby.id),
+    ]) {
+      if (snapshot.failedWorkerIds.includes(worker.id)) return [];
+      if (worker.credentialId !== "payments-key-v2")
+        add("deploy_credential", worker.id, {
+          consumerId: worker.id,
+          credentialId: "payments-key-v2",
+        });
+      if (!worker.verified || worker.credentialId !== "payments-key-v2")
+        add("verify_consumer", worker.id, { consumerId: worker.id });
+      if (worker.id === standby.id && snapshot.trafficWorkerId !== standby.id)
+        add("switch_traffic", worker.id, { workerId: worker.id });
+    }
+    if (snapshot.credentialState !== "REVOKED")
+      add("revoke_credential", "payments-key-v1");
+    return steps;
   }
 }

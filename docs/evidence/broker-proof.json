@@ -1,0 +1,14 @@
+{
+  "runId": "broker-proof-d0a38271-3b77-4d9d-839f-d2982194476f",
+  "origin": "HISTORICAL_REPLAY",
+  "recordedAt": "2026-09-12T23:34:50.131Z",
+  "checks": [
+    "Unauthenticated direct call rejected",
+    "Unsafe revocation revised with zero receipts and immutable trace",
+    "Forged evidence, forged copy, and genuine stale evidence rejected",
+    "Changing historical outcome changes recovery eligibility",
+    "Gateway, failed standby, hidden consumer and staging variants change decisions",
+    "Changed arguments rejected; duplicate execution has one receipt; old trace unchanged",
+    "Topology version changes invalidate authorization"
+  ]
+}
