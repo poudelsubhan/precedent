@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { config } from "dotenv";
@@ -573,6 +573,15 @@ const consumeRun = async (run: RunRecord): Promise<void> => {
     await publishRunEvent(run.runId, run.origin, "RUN_COMPLETED", {
       status: run.status,
     });
+  } finally {
+    const directory = fileURLToPath(
+      new URL("../../../data/runs", import.meta.url),
+    );
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(
+      `${directory}/${run.runId}.json`,
+      JSON.stringify(publicRun(run), null, 2),
+    );
   }
 };
 
@@ -745,7 +754,27 @@ server.post("/api/runs/:runId/cancel", async (request) => {
 });
 
 server.post("/api/runs/:runId/resume", async (request) => {
-  const prior = runs.get((request.params as { runId: string }).runId);
+  const id = (request.params as { runId: string }).runId;
+  if (!/^[a-f0-9-]{36}$/.test(id))
+    throw Object.assign(new Error("Invalid run ID"), { statusCode: 400 });
+  const path = fileURLToPath(
+    new URL(`../../../data/runs/${id}.json`, import.meta.url),
+  );
+  const saved = existsSync(path)
+    ? (JSON.parse(readFileSync(path, "utf8")) as {
+        sessionId?: string;
+        status: string;
+        origin: RunOrigin;
+      })
+    : undefined;
+  const prior =
+    runs.get(id) ??
+    (saved
+      ? {
+          ...saved,
+          status: saved.status === "running" ? "interrupted" : saved.status,
+        }
+      : undefined);
   if (!prior?.sessionId || prior.status === "running")
     throw Object.assign(
       new Error("No resumable completed session is available."),

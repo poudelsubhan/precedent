@@ -62,6 +62,8 @@ export type EvidenceLineage = {
   trusted: boolean;
   verifiedBy: string | null;
   contentHash: string;
+  applicable?: boolean;
+  paths?: Array<{ nodeIds: string[]; relationshipIds: string[] }>;
 };
 
 export type Decision = {
@@ -69,6 +71,13 @@ export type Decision = {
   evaluation: Evaluation;
   trace: {
     queryId: string;
+    recordedAt?: string;
+    queries?: Array<{
+      id: string;
+      cypher: string;
+      parameters: Record<string, unknown>;
+    }>;
+    candidates?: HistoricalCase[];
     graphVersion: { scenarioVersion: number; policyVersion: number };
     facts: {
       dependencies: Array<{
@@ -91,6 +100,18 @@ export type Probe = {
   probeClass: "LEGITIMATE_PAYMENT" | "ATTACKER" | "LEDGER";
   success: boolean;
   observedAt: string;
+};
+
+export type RangeMetrics = {
+  live: {
+    windowStart: string | null;
+    windowEnd: string | null;
+    paymentSuccesses: number;
+    paymentFailures: number;
+    attackerSuccesses: number;
+    attackerBlocked: number;
+    reachableCriticalAssets: number;
+  };
 };
 
 export type Dashboard = {
@@ -123,6 +144,8 @@ const lineageSchema = z.object({
   trusted: z.boolean(),
   verifiedBy: z.string().nullable(),
   contentHash: z.string(),
+  applicable: z.boolean().optional(),
+  paths: z.array(SupportingPathSchema).optional(),
 });
 const dependencySchema = z.object({
   id: z.string(),
@@ -135,6 +158,17 @@ const decisionSchema = z.object({
   evaluation: EvaluationSchema,
   trace: z.object({
     queryId: z.string(),
+    recordedAt: z.string().optional(),
+    queries: z
+      .array(
+        z.object({
+          id: z.string(),
+          cypher: z.string(),
+          parameters: z.record(z.string(), z.unknown()),
+        }),
+      )
+      .optional(),
+    candidates: z.array(caseSchema).optional(),
     graphVersion: z.object({
       scenarioVersion: z.number(),
       policyVersion: z.number(),
@@ -190,17 +224,30 @@ const topologySchema = z.object({
 });
 
 export function decodeResponse(path: string, value: unknown): unknown {
-  const schema = path.startsWith("/api/decisions/")
-    ? decisionSchema
-    : path === "/api/alerts"
-      ? alertsSchema
-      : path === "/api/topology"
-        ? topologySchema
-        : path === "/api/cases"
-          ? z.object({ cases: z.array(caseSchema) })
-          : path === "/api/policies"
-            ? z.object({ policies: z.array(policySchema) })
-            : z.object({ runId: z.string().min(1) }).passthrough();
+  const schema =
+    path === "/api/metrics"
+      ? z.object({
+          live: z.object({
+            windowStart: z.string().nullable(),
+            windowEnd: z.string().nullable(),
+            paymentSuccesses: z.number(),
+            paymentFailures: z.number(),
+            attackerSuccesses: z.number(),
+            attackerBlocked: z.number(),
+            reachableCriticalAssets: z.number(),
+          }),
+        })
+      : path.startsWith("/api/decisions/")
+        ? decisionSchema
+        : path === "/api/alerts"
+          ? alertsSchema
+          : path === "/api/topology"
+            ? topologySchema
+            : path === "/api/cases"
+              ? z.object({ cases: z.array(caseSchema) })
+              : path === "/api/policies"
+                ? z.object({ policies: z.array(policySchema) })
+                : z.object({ runId: z.string().min(1) }).passthrough();
   const decoded = schema.safeParse(value);
   if (!decoded.success)
     throw new Error(

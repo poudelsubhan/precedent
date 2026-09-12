@@ -712,6 +712,10 @@ export class GraphRepository {
           { json: JSON.stringify(snapshot), version: snapshot.scenarioVersion },
         );
         await tx.run(
+          'MATCH (node:Asset {assetClass: "Service"}) WHERE node.id STARTS WITH "payment-worker-" AND NOT node.id IN $ids DETACH DELETE node',
+          { ids: snapshot.workers.map((worker) => worker.id) },
+        );
+        await tx.run(
           'MATCH (node:Asset {assetClass: "Service"}) WHERE node.id STARTS WITH "payment-worker-" SET node.active = false',
         );
         await tx.run(
@@ -1404,11 +1408,14 @@ export class GraphRepository {
   async resetFixtureMemory(): Promise<void> {
     const session = this.driver.session({ database: this.database });
     try {
-      await session.executeWrite((tx) =>
-        tx.run(
-          "MATCH (incident:Incident) WHERE incident.learned = true OPTIONAL MATCH (incident)-[:HAS_CONTEXT|PROPOSES|RESULTED_IN]->(child) DETACH DELETE incident, child",
-        ),
-      );
+      await session.executeWrite(async (tx) => {
+        await tx.run(
+          "MATCH (incident:Incident {learned: true}) OPTIONAL MATCH (incident)-[:CITES]->(evidence:Evidence) OPTIONAL MATCH (evidence)-[:VERIFIED_BY]->(verification:Verification) OPTIONAL MATCH (verification)-[:SUPPORTED_BY]->(probe:Probe) DETACH DELETE evidence, verification, probe",
+        );
+        await tx.run(
+          "MATCH (incident:Incident {learned: true}) OPTIONAL MATCH (incident)-[:HAS_CONTEXT|PROPOSES|RESULTED_IN]->(child) DETACH DELETE incident, child",
+        );
+      });
     } finally {
       await session.close();
     }

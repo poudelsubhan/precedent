@@ -1008,3 +1008,23 @@ summary:focus-visible,
     grid-template-columns: 1fr;
   }
 }
+
+.secondary-controls select {
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  font: inherit;
+  min-height: 36px;
+  padding: 6px 10px;
+}
+.secondary-controls select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+.session-strip {
+  flex-wrap: wrap;
+}
+.trace-section li {
+  overflow-wrap: anywhere;
+}

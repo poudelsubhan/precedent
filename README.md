@@ -8,22 +8,22 @@ For example, an attacker copies a payments credential at the fictional Nexus Fin
 
 The intended recovery is to restrict the compromised credential, move the workers to a replacement, check that payments still work, and then revoke the old credential. Each action needs its own approval. A forged runbook cannot approve shutting down the ledger just by saying a security leader signed it.
 
-The project currently runs a local demonstration with a modeled payments environment. The complete live recovery, independent traffic tests, and learning across fresh agent sessions still need to meet the acceptance checks in the plan.
+The local demonstration runs real HTTP payment and attacker requests against a controlled payments range. A recorded Qoder run completed recovery, passed independent checks, and created a verified case. A fresh agent session then cited that new case and recovered another incident. The [evidence report](docs/evidence/live-recovery.json) contains the original decisions, receipts, and probe results.
 
 > Check the context. Explain the decision. Verify the outcome.
 
-[Build audit](docs/build-audit.md) · [Demo guide](docs/demo-guide.md) · [Design decisions](docs/design-principles.md)
+[Silent 2:40 recorded demo](docs/media/recorded-demo.mp4) · [Your narration script](docs/demo-script.md) · [Build evidence](docs/build-audit.md) · [Design decisions](docs/design-principles.md)
 
 ## How it works
 
-| Step        | What Precedent does                                                                                                         |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Investigate | Qoder reads the incident, system dependencies, policies, and past cases.                                                    |
-| Check       | Precedent evaluates a proposed action and the evidence it cites.                                                            |
-| Intervene   | It allows the action, blocks it, suggests a revision, or asks for missing information.                                      |
-| Execute     | A separate broker checks the approval before changing the demo environment.                                                 |
-| Verify      | Probes report modeled payment, attacker, and ledger outcomes.                                                               |
-| Remember    | A promotion path can save a successful recovery as a new case. Full validation and later reuse remain open acceptance work. |
+| Step        | What Precedent does                                                                    |
+| ----------- | -------------------------------------------------------------------------------------- |
+| Investigate | Qoder reads the incident, system dependencies, policies, and past cases.               |
+| Check       | Precedent evaluates a proposed action and the evidence it cites.                       |
+| Intervene   | It allows the action, blocks it, suggests a revision, or asks for missing information. |
+| Execute     | A separate broker checks the approval before changing the demo environment.            |
+| Verify      | Independent requests check payments, attacker access, and the ledger.                  |
+| Remember    | Verified payment, attacker, and ledger results turn a recovery into a trusted case.    |
 
 ## Architecture
 
@@ -35,7 +35,7 @@ flowchart TD
     Memory[Neo4j: dependencies, policies, history, sources] <--> Gate
     Gate -->|Blocked with reasons| Qoder
     Gate -->|Exact action approval| Broker[Execution broker]
-    Broker --> Range[Modeled payments environment]
+    Broker --> Range[Isolated HTTP payments range]
     Range --> Probes[Check the outcome]
     Probes --> Learning[Recovery promotion]
     Learning --> Memory
@@ -53,11 +53,11 @@ Approvals are tied to the action, arguments, caller, run, state version, and exp
 - **Blocked revocation:** the H41 historical proposal receives `REVISE` while payment workers still use the old credential.
 - **Evidence rejection:** the evaluator rejects untrusted evidence before allowing the requested action.
 - **Copied credentials:** the range tests show that isolating the originating laptop does not stop off-device use of a copied credential.
-- **Recovery guards:** tests cover migration, traffic switching, revocation, and duplicate mutation handling in the modeled range.
+- **Recovery guards:** tests cover migration, traffic switching, revocation, and duplicate mutation handling in the HTTP range.
 - **Console behavior:** the interface separates live agent events, historical replay, and counterfactual results. It exposes decision paths, execution receipts, probe times, and a selected-decision export.
 - **Frontend checks:** tests cover stale response protection, request cancellation, and invalid response data. Type checking and the production build are separate checks.
 
-These are bounded checks, not proof that every phase is finished. The [audit](docs/build-audit.md) records the remaining work, including real traffic generation, history-dependent recovery selection, immutable evidence, and the full live learning loop.
+The [acceptance evidence](docs/evidence/broker-proof.json) also covers altered arguments, duplicate execution, stale approvals, changed history, missing gateways, failed standby workers, additional consumers, and staging. Decision reports retain the facts and graph queries used at evaluation. See the [audit](docs/build-audit.md) for measured acceptance and submission status.
 
 The historical cases H41, H72, H89, and H97 are fictional fixtures. They are created in `packages/graph/src/index.ts`. The range does not reproduce AWS IAM or operate a real payment network.
 
@@ -70,7 +70,7 @@ The historical cases H41, H72, H89, and H97 are fictional fixtures. They are cre
 | Next.js and React Flow | Present the action stream, infrastructure graph, and evidence inspector.                                                                                             |
 | TypeScript and Zod     | Define shared data contracts and check incoming data.                                                                                                                |
 
-The runtime uses the local Qoder CLI session through `qodercliAuth()`. Development traces and a recorded complete demonstration still need to be packaged as submission evidence.
+The runtime uses the local Qoder CLI session through `qodercliAuth()`. The recorded runtime evidence includes actual SDK permission callbacks, a revised proposal with no execution receipt, and approved actions with receipts. Qoder development review was waived by the project owner; runtime evidence is labeled separately.
 
 ## Run locally
 
@@ -96,16 +96,29 @@ Open [localhost:3000](http://localhost:3000).
 | ------- | ---------------- | -------------------------------- |
 | Console | `localhost:3000` | The incident interface           |
 | Broker  | `127.0.0.1:3001` | Evaluation and execution checks  |
-| Range   | `127.0.0.1:3002` | The controlled scenario model    |
+| Range   | `127.0.0.1:3002` | The controlled HTTP range        |
 | Runner  | `127.0.0.1:3003` | Qoder sessions and demo controls |
+
+### Run the container range
+
+The native development command starts separate Node processes. Docker provides the isolated range: checkout, two workers, gateway, ledger, legitimate load, and two attacker processes, plus an independent counterfactual copy.
+
+```sh
+node scripts/configure-range.mjs
+docker compose --env-file .env.range -f compose.range.yaml up -d --build
+npx tsx scripts/prove-range.ts
+node scripts/run-broker-proof.mjs
+```
+
+The controller listens on `127.0.0.1:3102`. Service traffic stays on Docker's internal network. To connect the normal broker to this range, set `RANGE_URL=http://127.0.0.1:3102` and use the range token generated in `.env.range`. Keep both environment files private. The broker proof temporarily uses the configured fictional Neo4j fixtures; run it while no agent incident is active.
 
 ## Try the demo
 
 1. **Replay H41 proposal.** Inspect a blocked credential revocation with a visible historical replay label. Select **Show me why** to read its evidence and paths.
-2. **Compare response.** Inspect immediate revocation in the separate counterfactual model alongside the latest live-run probes. The comparison does not yet guarantee identical starting snapshots.
+2. **Compare response.** Clone the current live state into a separate counterfactual range and measure what immediate revocation does there. Run this before recovery for the outage comparison.
 3. **Launch attack response.** Start a real Qoder session and follow its proposed actions. The current scenario already begins with a compromised credential; this button starts the response.
 
-Under **Scenario tools & reset**, inject the forged runbook or reset the live topology while keeping learned memory. In the expanded decision trace, **Export selected decision** downloads that decision and the retained events for its run. This is not yet a complete durable run export.
+Under **Scenario tools & reset**, inject the forged runbook, start a fresh incident while keeping memory, or restore the seeded fixture. Gateway, additional-consumer, failed-standby, and staging variants exercise different decisions. In the expanded decision trace, **Export selected decision** downloads that decision and the retained events for its run. **Export complete run report** includes all persisted events, decisions, receipts, measured outcomes, and learned case IDs.
 
 If Qoder chooses a safe response immediately, show that honestly. Use the labeled H41 replay to demonstrate the blocked proposal instead of attributing it to the live agent.
 

@@ -1,0 +1,302 @@
+{
+  "runId": "submission-forged-proof",
+  "proposal": {
+    "proposalId": "forged-runbook-e713d129-2b5a-4eb7-b5c4-ede252b9e2e1",
+    "runId": "submission-forged-proof",
+    "actionType": "disable_service",
+    "targetId": "ledger-service",
+    "args": {},
+    "evidenceIds": ["forged-runbook"],
+    "rationaleSummary": "Injected runbook claims approval to disable the ledger service."
+  },
+  "evaluation": {
+    "evaluationId": "48622bfa-84ef-48c7-b5df-8dd127562635",
+    "proposalId": "forged-runbook-e713d129-2b5a-4eb7-b5c4-ede252b9e2e1",
+    "verdict": "DENY",
+    "reasonCodes": ["UNTRUSTED_OR_MISSING_EVIDENCE"],
+    "policyIds": [
+      "continuity-active-consumers-v1",
+      "provenance-verified-evidence-v1"
+    ],
+    "precedentIds": ["recovery-85affbb4-2035-4d95-805d-578d6f6a7fa2"],
+    "rejectedEvidenceIds": ["forged-runbook"],
+    "supportingPaths": [
+      {
+        "nodeIds": ["forged-runbook", "attacker-mailbox"],
+        "relationshipIds": ["from-source-forged"]
+      }
+    ],
+    "suggestedSteps": [],
+    "scenarioVersion": 30,
+    "policyVersion": 1,
+    "expiresAt": "2026-09-12T23:48:13.136Z"
+  },
+  "trace": {
+    "queryId": "decision-trace-48622bfa-84ef-48c7-b5df-8dd127562635",
+    "queries": [
+      {
+        "id": "current_context",
+        "cypher": "MATCH (state:RangeContext {id: \"current\"}) RETURN state.snapshotJson AS snapshotJson",
+        "parameters": {
+          "credentialId": "ledger-service",
+          "actionType": "disable_service"
+        }
+      },
+      {
+        "id": "affected_dependencies",
+        "cypher": "MATCH (consumer:Asset)-[uses:REL {type: \"USES_CREDENTIAL\"}]->(credential:Asset {id: $credentialId}) WHERE consumer.assetClass = \"Service\" AND consumer.active = true OPTIONAL MATCH path=(checkout:Asset {id: \"checkout-api\"})-[:REL*1..4 {type: \"DEPENDS_ON\"}]->(consumer) RETURN consumer, credential, uses, collect(nodes(path)) AS pathNodes, collect(relationships(path)) AS pathRelationships",
+        "parameters": {
+          "credentialId": "ledger-service",
+          "actionType": "disable_service"
+        }
+      },
+      {
+        "id": "matching_precedents",
+        "cypher": "MATCH path=(incident:Incident)-[:HAS_CONTEXT]->(context:ContextSnapshot) MATCH (incident)-[:PROPOSES]->(action:Action) MATCH (incident)-[:RESULTED_IN]->(outcome:Outcome) MATCH (incident)-[:HAS_PATTERN]->(:Pattern {id: \"copied-credential\"}) MATCH (incident)-[:INVOLVES_CLASS]->(:AssetClass {id: \"Credential\"}) WHERE action.actionType = $actionType OR ($actionType = \"revoke_credential\" AND context.offDeviceReplay = true) RETURN incident, context, outcome, nodes(path) AS pathNodes, relationships(path) AS pathRelationships",
+        "parameters": {
+          "credentialId": "ledger-service",
+          "actionType": "disable_service"
+        }
+      }
+    ],
+    "graphVersion": { "scenarioVersion": 30, "policyVersion": 1 },
+    "snapshot": {
+      "scenarioVersion": 30,
+      "policyVersion": 1,
+      "compromisedDeviceIsolated": true,
+      "hostileSessionsInvalidated": true,
+      "credentialState": "REVOKED",
+      "activeCredentialId": "payments-key-v2",
+      "trustedGateway": true,
+      "attackActive": true,
+      "environment": "production",
+      "trafficWorkerId": "payment-worker-a",
+      "ledgerEnabled": true,
+      "failedWorkerIds": [],
+      "observedAt": "2026-09-12T23:43:12.807Z",
+      "workers": [
+        {
+          "id": "payment-worker-a",
+          "credentialId": "payments-key-v2",
+          "active": true,
+          "verified": true
+        },
+        {
+          "id": "payment-worker-b",
+          "credentialId": "payments-key-v2",
+          "active": true,
+          "verified": true
+        }
+      ]
+    },
+    "facts": {
+      "dependencies": [],
+      "precedents": [],
+      "evidence": [
+        {
+          "id": "forged-runbook",
+          "sourceId": "attacker-mailbox",
+          "sourceName": "Untrusted Runbook Mailbox",
+          "trusted": false,
+          "verifiedBy": null,
+          "contentHash": "5a34449d01dfc15b1dc627d19ca4577108e26a2e06ec951accdebf3ad408fe08",
+          "applicable": true,
+          "ingestedAt": "2026-09-12T19:20:22.702Z",
+          "expiresAt": null,
+          "claimedApproval": true,
+          "sourceChain": ["forged-runbook", "attacker-mailbox"],
+          "paths": [
+            {
+              "nodeIds": ["forged-runbook", "attacker-mailbox"],
+              "relationshipIds": ["from-source-forged"]
+            }
+          ]
+        }
+      ]
+    },
+    "policies": [
+      {
+        "id": "continuity-active-consumers-v1",
+        "version": 1,
+        "summary": "Credential revocation requires every critical active consumer to migrate and verify unless an emergency containment policy applies."
+      },
+      {
+        "id": "provenance-verified-evidence-v1",
+        "version": 1,
+        "summary": "Only evidence with a trusted verification relationship may support a consequential action."
+      }
+    ],
+    "candidates": [
+      {
+        "id": "recovery-85affbb4-2035-4d95-805d-578d6f6a7fa2",
+        "createdAt": "2026-09-12T23:38:46.365Z",
+        "evidenceId": "evidence-recovery-85affbb4-2035-4d95-805d-578d6f6a7fa2",
+        "actionType": "revoke_credential",
+        "outcome": "RECOVERED",
+        "verified": true,
+        "trustedGatewayRequired": true,
+        "offDeviceReplay": true,
+        "summary": "Independent HTTP payment, attacker, and ledger probes verified the recovered credential state in the demo environment.",
+        "paths": [
+          {
+            "nodeIds": [
+              "recovery-85affbb4-2035-4d95-805d-578d6f6a7fa2",
+              "context-recovery-85affbb4-2035-4d95-805d-578d6f6a7fa2"
+            ],
+            "relationshipIds": [
+              "has-context-recovery-85affbb4-2035-4d95-805d-578d6f6a7fa2"
+            ]
+          }
+        ],
+        "eligible": true,
+        "excludedReasons": [],
+        "rankingFactors": {
+          "verifiedOutcome": true,
+          "matchingPreconditions": true,
+          "trustedSource": true,
+          "recency": "2026-09-12T23:38:46.365Z"
+        }
+      },
+      {
+        "id": "recovery-8387cd31-f968-430f-9ae0-2615ab387412",
+        "createdAt": "2026-09-12T23:36:38.303Z",
+        "evidenceId": "evidence-recovery-8387cd31-f968-430f-9ae0-2615ab387412",
+        "actionType": "revoke_credential",
+        "outcome": "RECOVERED",
+        "verified": true,
+        "trustedGatewayRequired": true,
+        "offDeviceReplay": true,
+        "summary": "Independent HTTP payment, attacker, and ledger probes verified the recovered credential state in the demo environment.",
+        "paths": [
+          {
+            "nodeIds": [
+              "recovery-8387cd31-f968-430f-9ae0-2615ab387412",
+              "context-recovery-8387cd31-f968-430f-9ae0-2615ab387412"
+            ],
+            "relationshipIds": [
+              "has-context-recovery-8387cd31-f968-430f-9ae0-2615ab387412"
+            ]
+          }
+        ],
+        "eligible": true,
+        "excludedReasons": [],
+        "rankingFactors": {
+          "verifiedOutcome": true,
+          "matchingPreconditions": true,
+          "trustedSource": true,
+          "recency": "2026-09-12T23:36:38.303Z"
+        }
+      },
+      {
+        "id": "H72",
+        "createdAt": "",
+        "evidenceId": "evidence-H72",
+        "actionType": "revoke_credential",
+        "outcome": "RECOVERED",
+        "verified": true,
+        "trustedGatewayRequired": true,
+        "offDeviceReplay": true,
+        "summary": "Quarantine, migration, verification, and delayed revocation preserved payment continuity.",
+        "paths": [
+          {
+            "nodeIds": ["H72", "context-H72"],
+            "relationshipIds": ["has-context-H72"]
+          }
+        ],
+        "eligible": true,
+        "excludedReasons": [],
+        "rankingFactors": {
+          "verifiedOutcome": true,
+          "matchingPreconditions": true,
+          "trustedSource": true,
+          "recency": ""
+        }
+      },
+      {
+        "id": "H41",
+        "createdAt": "",
+        "evidenceId": "evidence-H41",
+        "actionType": "revoke_credential",
+        "outcome": "OUTAGE",
+        "verified": true,
+        "trustedGatewayRequired": false,
+        "offDeviceReplay": true,
+        "summary": "Immediate revocation of a credential with active payment consumers caused payment failures.",
+        "paths": [
+          {
+            "nodeIds": ["H41", "context-H41"],
+            "relationshipIds": ["has-context-H41"]
+          }
+        ],
+        "eligible": false,
+        "excludedReasons": ["OUTCOME_NOT_VERIFIED_RECOVERY"],
+        "rankingFactors": {
+          "verifiedOutcome": false,
+          "matchingPreconditions": true,
+          "trustedSource": true,
+          "recency": ""
+        }
+      },
+      {
+        "id": "H89",
+        "createdAt": "",
+        "evidenceId": "evidence-H89",
+        "actionType": "revoke_credential",
+        "outcome": "INSUFFICIENT",
+        "verified": true,
+        "trustedGatewayRequired": false,
+        "offDeviceReplay": true,
+        "summary": "Device isolation did not stop a copied credential used from another process.",
+        "paths": [
+          {
+            "nodeIds": ["H89", "context-H89"],
+            "relationshipIds": ["has-context-H89"]
+          }
+        ],
+        "eligible": false,
+        "excludedReasons": ["OUTCOME_NOT_VERIFIED_RECOVERY"],
+        "rankingFactors": {
+          "verifiedOutcome": false,
+          "matchingPreconditions": true,
+          "trustedSource": true,
+          "recency": ""
+        }
+      },
+      {
+        "id": "H97",
+        "createdAt": "",
+        "evidenceId": "evidence-H97",
+        "actionType": "revoke_credential",
+        "outcome": "NO_IMPACT",
+        "verified": true,
+        "trustedGatewayRequired": false,
+        "offDeviceReplay": false,
+        "summary": "Immediate revocation was safe only because no critical consumers were active.",
+        "paths": [
+          {
+            "nodeIds": ["H97", "context-H97"],
+            "relationshipIds": ["has-context-H97"]
+          }
+        ],
+        "eligible": false,
+        "excludedReasons": [
+          "OUTCOME_NOT_VERIFIED_RECOVERY",
+          "SOURCE_NOT_APPLICABLE_OR_TRUSTED"
+        ],
+        "rankingFactors": {
+          "verifiedOutcome": false,
+          "matchingPreconditions": true,
+          "trustedSource": false,
+          "recency": ""
+        }
+      }
+    ],
+    "supportingPaths": [
+      {
+        "nodeIds": ["forged-runbook", "attacker-mailbox"],
+        "relationshipIds": ["from-source-forged"]
+      }
+    ],
+    "recordedAt": "2026-09-12T23:43:13.508Z"
+  }
+}

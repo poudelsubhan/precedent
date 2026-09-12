@@ -25,6 +25,7 @@ import {
   requestJson,
   LatestRequest,
   type Dashboard,
+  type RangeMetrics,
   type Decision,
   type GraphView,
   type Probe,
@@ -133,6 +134,9 @@ function originLabel(event: EventEnvelope): string {
 }
 
 function eventSummary(event: EventEnvelope): string {
+  const receipt = asRecord(event.payload.receipt);
+  if (typeof receipt.actionType === "string")
+    return `${receipt.actionType.replaceAll("_", " ")} · ${String(receipt.status)}`;
   const evaluation = payloadEvaluation(event);
   if (evaluation) {
     return `${evaluation.verdict} · ${evaluation.reasonCodes.join(", ")}`;
@@ -171,6 +175,9 @@ function latestProbe(
 }
 
 export function IncidentConsole() {
+  const [metrics, setMetrics] = useState<RangeMetrics | null>(null);
+  const [metricError, setMetricError] = useState(false);
+  const [variant, setVariant] = useState("production");
   const [dashboard, setDashboard] = useState<Dashboard>(initialDashboard);
   const [events, setEvents] = useState<EventEnvelope[]>([]);
   const [decision, setDecision] = useState<Decision | null>(null);
@@ -178,6 +185,7 @@ export function IncidentConsole() {
     string | null
   >(null);
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
+  const [showTelemetry, setShowTelemetry] = useState(false);
   const [graphView, setGraphView] = useState<GraphView>("CURRENT");
   const [showComparison, setShowComparison] = useState(false);
   const [showWhy, setShowWhy] = useState(false);
@@ -187,6 +195,7 @@ export function IncidentConsole() {
     "Ready. Replay H41 to inspect a blocked proposal, or launch a live response.",
   );
   const [decisionPending, setDecisionPending] = useState(false);
+  const selectedDecision = useRef<string | null>(null);
   const decisionRequest = useRef(new LatestRequest());
   const dashboardRequest = useRef(new LatestRequest());
   const manualSelection = useRef(false);
@@ -237,6 +246,7 @@ export function IncidentConsole() {
       if (!isCurrent()) return;
       setDecision(next);
       setSelectedEvaluationId(evaluationId);
+      selectedDecision.current = evaluationId;
     } catch (loadError) {
       if (!isCurrent()) return;
       setError(
@@ -247,6 +257,30 @@ export function IncidentConsole() {
     } finally {
       if (isCurrent()) setDecisionPending(false);
     }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      try {
+        const result = await requestJson<RangeMetrics>(
+          brokerUrl,
+          "/api/metrics",
+        );
+        if (active) {
+          setMetrics(result);
+          setMetricError(false);
+        }
+      } catch {
+        if (active) setMetricError(true);
+      }
+    };
+    void refresh();
+    const interval = setInterval(() => void refresh(), 2000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
   }, []);
 
   useEffect(() => {
@@ -275,10 +309,13 @@ export function IncidentConsole() {
           setCurrentRunId(null);
           setDecision(null);
           setSelectedEvaluationId(null);
+          selectedDecision.current = null;
           manualSelection.current = false;
           decisionRequest.current.cancel();
           setDecisionPending(false);
         }
+        if (event.type === "ACTION_EXECUTED" && selectedDecision.current)
+          void loadDecision(selectedDecision.current);
         if (evaluation && !manualSelection.current) {
           void loadDecision(evaluation.evaluationId);
         } else {
@@ -350,6 +387,7 @@ export function IncidentConsole() {
     action: string,
     path: string,
     origin: RunOrigin = "LIVE_AGENT",
+    options: Record<string, unknown> = {},
   ) => {
     if (action === "compare") setShowComparison(true);
     setError(null);
@@ -360,7 +398,7 @@ export function IncidentConsole() {
       const runId = currentRunId ?? crypto.randomUUID();
       const result = await requestJson<{ runId: string }>(runnerUrl, path, {
         method: "POST",
-        body: JSON.stringify({ runId, origin }),
+        body: JSON.stringify({ runId, origin, ...options }),
       });
       if (action !== "reset" && origin === "LIVE_AGENT")
         setCurrentRunId(result.runId);
@@ -459,8 +497,8 @@ export function IncidentConsole() {
       const nodes: Node[] = [];
       const edges: Edge[] = [];
       evidence.forEach((item, index) => {
-        const evidenceId = `evidence-${item.id}`;
-        const sourceId = `source-${item.sourceId}`;
+        const evidenceId = item.id;
+        const sourceId = item.sourceId;
         nodes.push({
           id: evidenceId,
           position: { x: 80, y: 75 + index * 170 },
@@ -481,7 +519,8 @@ export function IncidentConsole() {
           });
         }
         edges.push({
-          id: `lineage-${item.id}`,
+          id:
+            item.paths?.[0]?.relationshipIds[0] ?? `legacy-lineage-${item.id}`,
           source: evidenceId,
           target: sourceId,
           label: "FROM SOURCE",
@@ -492,7 +531,7 @@ export function IncidentConsole() {
           labelStyle: { fill: "var(--muted)", fontSize: 10 },
         });
         if (item.verifiedBy) {
-          const verificationId = `verification-${item.verifiedBy}`;
+          const verificationId = item.verifiedBy;
           nodes.push({
             id: verificationId,
             position: { x: 720, y: 75 + index * 170 },
@@ -500,7 +539,9 @@ export function IncidentConsole() {
             style: nodeStyle("var(--green)", false),
           });
           edges.push({
-            id: `verified-${item.id}`,
+            id:
+              item.paths?.[1]?.relationshipIds[0] ??
+              `legacy-verified-${item.id}`,
             source: evidenceId,
             target: verificationId,
             label: "VERIFIED BY",
@@ -565,6 +606,12 @@ export function IncidentConsole() {
   const paymentProbe = latestProbe(observedEvents, "LEGITIMATE_PAYMENT");
   const attackerProbe = latestProbe(observedEvents, "ATTACKER");
   const ledgerProbe = latestProbe(observedEvents, "LEDGER");
+
+  const visibleEvents = events.filter(
+    (event) =>
+      showTelemetry ||
+      !["AGENT_TOOL_EVENT", "TOOL_PERMISSION"].includes(event.type),
+  );
 
   return (
     <main className="console-shell" id="main-content">
@@ -633,8 +680,25 @@ export function IncidentConsole() {
 
       <div className="session-strip">
         <span>{connection}</span>
-        <span>Fictional scenario · modeled range observations</span>
+        <span>
+          {metricError
+            ? "Request counters unavailable · reconnecting"
+            : metrics
+              ? `${metrics.live.paymentSuccesses} payments passed / ${metrics.live.paymentFailures} failed · ${metrics.live.attackerBlocked} attacker requests blocked / ${metrics.live.attackerSuccesses} passed · ${metrics.live.reachableCriticalAssets} critical assets reachable`
+              : "Loading request counters…"}
+        </span>
+        <span>Fictional scenario · actual HTTP requests</span>
       </div>
+      {metrics?.live.windowStart && (
+        <p className="command-status">
+          Observed window:{" "}
+          {new Date(metrics.live.windowStart).toLocaleTimeString()}–
+          {metrics.live.windowEnd
+            ? new Date(metrics.live.windowEnd).toLocaleTimeString()
+            : "—"}
+          . Counters refresh every two seconds.
+        </p>
+      )}
       <p className="command-status" role="status" aria-live="polite">
         {notice}
       </p>
@@ -719,6 +783,55 @@ export function IncidentConsole() {
                 : "Reset topology · keep memory"}
             </button>
           </div>
+          <div className="control-actions">
+            <label>
+              Incident variant{" "}
+              <select
+                value={variant}
+                onChange={(event) => setVariant(event.target.value)}
+              >
+                <option value="production">Production</option>
+                <option value="no-gateway">Gateway unavailable</option>
+                <option value="hidden-consumer">Additional consumer</option>
+                <option value="failed-standby">Standby failed</option>
+                <option value="staging">Staging</option>
+              </select>
+            </label>
+            <button
+              disabled={busyAction !== null}
+              onClick={() =>
+                void runDemo(
+                  "new incident",
+                  "/api/demo/new-incident",
+                  "LIVE_AGENT",
+                  { variant },
+                )
+              }
+            >
+              New incident · keep memory
+            </button>
+            <button
+              disabled={busyAction !== null}
+              onClick={() =>
+                void runDemo("launch attack", "/api/demo/launch-attack")
+              }
+            >
+              Launch attack
+            </button>
+            <button
+              disabled={busyAction !== null}
+              onClick={() =>
+                void runDemo(
+                  "full reset",
+                  "/api/demo/new-incident",
+                  "LIVE_AGENT",
+                  { variant: "production", fullReset: true, launch: false },
+                )
+              }
+            >
+              Restore seeded fixture
+            </button>
+          </div>
           <p className="command-status">
             Reset restores the live topology and preserves learned precedent.
           </p>
@@ -732,7 +845,7 @@ export function IncidentConsole() {
         >
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">COUNTERFACTUAL · MODELED RESULTS</p>
+              <p className="eyebrow">COUNTERFACTUAL · HTTP RESULTS</p>
               <h2>Immediate revocation vs. live response</h2>
             </div>
             <button
@@ -743,9 +856,9 @@ export function IncidentConsole() {
             </button>
           </div>
           <p className="trace-note">
-            Counterfactual results come from a separate seeded model. The
-            backend does not yet guarantee that it matches the live incident’s
-            initial snapshot.
+            The counterfactual clones the live state when comparison starts,
+            then revokes the credential in a separate range. Each result is an
+            independent HTTP probe.
           </p>
           <div className="comparison-grid">
             {(["LEGITIMATE_PAYMENT", "ATTACKER", "LEDGER"] as const).map(
@@ -795,16 +908,24 @@ export function IncidentConsole() {
               <p className="eyebrow">ORDERED APPLICATION EVENTS</p>
               <h2>Action stream</h2>
             </div>
-            <span className="count-badge">{events.length}</span>
+            <span className="count-badge">{visibleEvents.length}</span>
           </div>
+          <label className="command-status">
+            <input
+              type="checkbox"
+              checked={showTelemetry}
+              onChange={(event) => setShowTelemetry(event.target.checked)}
+            />{" "}
+            Show SDK telemetry
+          </label>
           <div className="timeline-list">
-            {events.length === 0 ? (
+            {visibleEvents.length === 0 ? (
               <p className="empty-state">
                 No events yet. Replay H41 below to see why immediate revocation
                 is blocked, or launch a live response.
               </p>
             ) : (
-              events.map((event) => {
+              visibleEvents.map((event) => {
                 const evaluationId = evaluationIdForEvent(event);
                 return (
                   <button
@@ -1027,9 +1148,41 @@ export function IncidentConsole() {
                   >
                     Export selected decision
                   </button>
+                  <button
+                    className="why-button"
+                    onClick={async () => {
+                      try {
+                        const response = await fetch(
+                          `${brokerUrl}/api/runs/${encodeURIComponent(decision.proposal.runId)}/report`,
+                        );
+                        if (!response.ok)
+                          throw new Error("Run report unavailable.");
+                        const blob = new Blob(
+                          [JSON.stringify(await response.json(), null, 2)],
+                          { type: "application/json" },
+                        );
+                        const url = URL.createObjectURL(blob);
+                        const link = document.createElement("a");
+                        link.href = url;
+                        link.download = `precedent-run-${decision.proposal.runId}.json`;
+                        link.click();
+                        URL.revokeObjectURL(url);
+                        setNotice("Complete durable run report exported.");
+                      } catch (error) {
+                        setError(
+                          error instanceof Error
+                            ? error.message
+                            : "Run export failed.",
+                        );
+                      }
+                    }}
+                  >
+                    Export complete run report
+                  </button>
                   <p className="trace-note">
-                    Supporting path IDs were stored at evaluation. Facts below
-                    are retrieved from the current graph and may have changed.
+                    {decision.trace.recordedAt
+                      ? `Immutable decision facts recorded ${new Date(decision.trace.recordedAt).toLocaleString()}.`
+                      : "Legacy trace: facts were not retained as an immutable snapshot."}
                   </p>
                   <TraceSection
                     title="Trace reference"
@@ -1039,10 +1192,17 @@ export function IncidentConsole() {
                     ]}
                   />
                   <TraceSection
-                    title="Current dependency facts"
+                    title="Dependency facts at evaluation"
                     items={decision.trace.facts.dependencies.map(
                       (item) =>
                         `${item.name} · ${item.active ? "active" : "inactive"}${item.critical ? " · critical" : ""}`,
+                    )}
+                  />
+                  <TraceSection
+                    title="Graph queries and parameters"
+                    items={(decision.trace.queries ?? []).map(
+                      (query) =>
+                        `${query.id} · ${query.cypher} · ${JSON.stringify(query.parameters)}`,
                     )}
                   />
                   <TraceSection

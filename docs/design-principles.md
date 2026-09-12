@@ -16,7 +16,7 @@ Launch a response, replay H41, and compare responses are the three primary contr
 
 History links use returned path IDs instead of invented case-to-case relationships. A replacement credential is not called verified just because of its name. No receipt means no receipt, not proof of completed execution. Unknown topology does not appear healthy. Probe results have timestamps and are scoped to the latest live run; comparison results are labeled separately.
 
-The backend currently re-queries decision facts. The trace labels this limitation rather than implying an immutable snapshot. The selected-decision export declares that it contains retained events, not the whole run.
+New decisions retain immutable snapshots, query text, parameters, lineage paths, and policy versions. Legacy traces are labeled. A selected-decision export and a separate complete durable run export make their scope explicit. Request counters show their observation window and refresh every two seconds. SDK telemetry is available on demand so operational events remain readable.
 
 ## Frontend behavior
 

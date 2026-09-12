@@ -1,23 +1,12 @@
-# Precedent demo guide
+# Demo guide
 
-Start the services using the README. The scenario already starts with a copied payments credential. All company names and historical cases are fictional.
+Use the [timed narration script](demo-script.md). Target 2:40 and record in your own voice. Use the labeled recordings for predictable timing instead of waiting for a new model session.
 
-## Three primary controls
+1. Reset topology while preserving memory. Replay H41 and open **Show me why**. The intercepted proposal and dependency path are the first reveal.
+2. Show the [recorded actual recovery](evidence/live-recovery.json): one REVISE, ten allowed actions, payment and ledger success, attacker blocked, and a new verified case.
+3. Inject the forged runbook. Open Sources and show that claimed approval has no trusted verification edge.
+4. Show the [fresh-session evidence](evidence/fresh-session.json): a different Qoder session cited the newly learned case and recovered again.
 
-1. **Replay H41 proposal** submits a historical immediate-revocation proposal to the gate. It should show REVISE while consumers depend on the old credential. Open **Show me why** to see policies, historical cases, paths, and receipt status.
-2. **Compare response** shows separate counterfactual model results beside the latest live-run probes. Payment failure after immediate revocation is the comparison’s key observation. The two snapshots and observation times are not yet guaranteed to match.
-3. **Launch attack response** starts Qoder’s investigation. Follow what the agent actually proposes. Session completion alone does not establish recovery.
+The console has three primary controls. Scenario tools include attack, fresh incident, gateway/standby/additional-consumer/staging variants, memory-preserving reset, and fixture reset. **Export complete run report** retrieves the durable event journal and stored decisions; **Export selected decision** is scoped to the current selection.
 
-## Evidence and scenario tools
-
-Select a decision in the action stream to keep it in view. Switch between Infrastructure, Memory, and Sources. The graph’s text alternative lists the same displayed nodes and links.
-
-Open **Scenario tools & reset** to inject a forged runbook. Inspect the resulting denial and source authority. Reset restores live topology while preserving graph memory; it does not clear the full seeded database.
-
-Use **Show me why → Export selected decision** to save the selected decision and retained events. The export is a partial inspection artifact, not a complete durable recording.
-
-## Honest presentation
-
-Say “historical proposal replay” for H41 and “counterfactual model” for the failed-response comparison. Do not attribute a supplied proposal to Qoder. Treat current probe results as point-in-time modeled observations, not proof of uninterrupted real payments.
-
-The complete three-minute recovery-and-learning story remains an acceptance target. See the [build audit](build-audit.md) before claiming that the live agent completed recovery or that a new verified case changed the next session.
+Comparison clones the live snapshot when clicked, then makes independent HTTP requests after revocation in the separate counterfactual. Run comparison before recovery to show the outage. These are controlled local services, not a real payment network or AWS IAM.

@@ -161,9 +161,10 @@ server.post(
   },
 );
 
-server.post("/admin/reset", { preHandler: authenticateBroker }, async () =>
-  range.reset(),
-);
+server.post("/admin/reset", { preHandler: authenticateBroker }, async () => {
+  observations.live = [];
+  return range.reset();
+});
 
 server.post(
   "/counterfactual/admin/mutate",
@@ -259,7 +260,12 @@ server.get("/metrics", { preHandler: authenticateBroker }, async () => {
       paymentFailures: payment.filter((item) => !item.success).length,
       attackerSuccesses: attacker.filter((item) => item.success).length,
       attackerBlocked: attacker.filter((item) => !item.success).length,
-      reachableCriticalAssets: attacker.at(-1)?.success ? 2 : 0,
+      reachableCriticalAssets: attacker.at(-1)?.success
+        ? (
+            (attacker.at(-1)?.response as { reachableAssets?: string[] })
+              ?.reachableAssets ?? []
+          ).length
+        : 0,
     };
   }
   return output;
