@@ -1,0 +1,29 @@
+{
+  "name": "precedent",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "npm@11.6.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n console,runner,broker,range -c blue,magenta,yellow,green \"npm run dev --workspace=@precedent/console\" \"npm run dev --workspace=@precedent/runner\" \"npm run dev --workspace=@precedent/broker\" \"npm run dev --workspace=@precedent/range\"",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "format": "prettier --check .",
+    "format:write": "prettier --write ."
+  },
+  "devDependencies": {
+    "@types/node": "24.3.1",
+    "concurrently": "9.2.1",
+    "prettier": "3.6.2",
+    "tsx": "4.20.5",
+    "typescript": "5.9.2",
+    "vitest": "3.2.4"
+  }
+}

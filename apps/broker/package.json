@@ -1,0 +1,19 @@
+{
+  "name": "@precedent/broker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@precedent/contracts": "file:../../packages/contracts",
+    "@precedent/events": "file:../../packages/events",
+    "@precedent/precedent": "file:../../packages/precedent",
+    "@precedent/range": "file:../range",
+    "dotenv": "17.4.2",
+    "fastify": "5.12.4"
+  }
+}
